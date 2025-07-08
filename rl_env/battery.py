@@ -13,8 +13,8 @@ class RechargeableBattery:
         Initializes the rechargeable battery with given parameters.
         Parameters:
             capacity (float): Total capacity of the battery in Wh.
-            max_charging_rate (float): Maximum charging rate in W.
-            max_discharging_rate (float): Maximum discharging rate in W.
+            max_charging_rate (float): Maximum charging rate in kW.
+            max_discharging_rate (float): Maximum discharging rate in kW.
             efficiency (float): Efficiency of charging/discharging (default is 1, i.e., 100%).
             init_soc (float): Initial state of charge (SoC) as a fraction of capacity (default is 0.5).
         """
@@ -30,7 +30,7 @@ class RechargeableBattery:
         Charges/Discharges the battery with the given power for the specified duration.
 
         Parameters:
-            power (float): Power in W to charge the battery.
+            power (float): Power in kW to charge the battery.
             duration (float): Duration in seconds for which the battery is charged (default is 1 sec).
         """
         energy = power * (duration / 3600)  # Convert duration from seconds to hours
@@ -73,7 +73,7 @@ class RechargeableBattery:
 
     def get_state_of_charge(self):
         """
-        Returns the current state of charge (SoC) of the battery.
+        Returns the normalized [0, 1] current state of charge (SoC) of the battery.
         """
         return self.battery_soc / self.capacity
 

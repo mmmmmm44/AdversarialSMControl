@@ -6,6 +6,10 @@ from datetime import datetime, timedelta, timezone, time
 from collections import deque
 
 import torch
+import matplotlib.pyplot as plt
+import seaborn as sns
+
+from render_window import RenderWindow
 
 
 from battery import RechargeableBattery
@@ -16,17 +20,21 @@ class SmartMeterWorld(gym.Env):
     This environment simulates a energy management unit connected with a rechargeable battery.
     """
 
-    def __init__(self, aggregate_load: pd.DataFrame, rb_config: Optional[dict] = None):
+    metadata = {"render_modes": ["human"], "render_fps": 4}
+
+    def __init__(self, aggregate_load_df: pd.DataFrame, rb_config: Optional[dict] = None, render_mode=None):
         super(SmartMeterWorld, self).__init__()
 
-        self.aggregate_load = aggregate_load
+        self.aggregate_load_df = aggregate_load_df.copy()
+        self.aggregate_load_df['grid_load'] = None  # add a new column for grid load
+        self.aggregate_load_df['battery_soc'] = None  # add a new column for battery state of charge
 
         # Initialize battery state
         self.battery = RechargeableBattery(**rb_config) if rb_config else RechargeableBattery(
                 capacity=8.0,  # kWh
                 max_charging_rate=4.0,  # kW
                 max_discharging_rate=4.0,  # kW
-                efficiency=0.99,  # 99% efficiency
+                efficiency=1.0,  # 100% efficiency
                 init_soc=0.5  # 50% initial state of charge
         )
 
@@ -61,6 +69,16 @@ class SmartMeterWorld(gym.Env):
         self.h_network_criterion = torch.nn.GaussianNLLLoss()  # loss function as the privacy signal
         self.h_network_inference_buffer = deque(maxlen=512)  # Buffer for H-network inference, to store recent pair of input (z_t, y_t) and desired target (y_{t+1})
 
+
+        # render stuffs
+        assert render_mode is None or render_mode in self.metadata["render_modes"]
+        self.render_mode = render_mode
+        if self.render_mode == "human":
+            # self.window = RenderWindow(title="Smart Meter World Visualization")
+            # self.window.show()
+
+            plt.ion()  # Enable interactive mode for matplotlib
+
     def _get_obs(self):
         """
         Get the current observation of the environment.
@@ -68,8 +86,8 @@ class SmartMeterWorld(gym.Env):
             dict: Current state observation including aggregate load, battery state of charge, and timestamp features.
         """
         soc = self.battery.get_state_of_charge()
-        current_load = self.aggregate_load.iloc[self.current_step]['aggregate']
-        timestamp = self.aggregate_load.iloc[self.current_step]['timestamp']
+        current_load = self.aggregate_load_df.iloc[self.current_step]['aggregate']
+        timestamp = self.aggregate_load_df.iloc[self.current_step]['timestamp']
         timestamp_features = self._create_timestamp_features(timestamp)
 
         return {
@@ -93,6 +111,9 @@ class SmartMeterWorld(gym.Env):
 
         self.h_network_inference_buffer.clear()  # Clear the inference buffer for H-network
 
+        self.aggregate_load_df['grid_load'] = None  # Reset grid load column
+        self.aggregate_load_df['battery_soc'] = None  # Reset battery state of charge column
+
         observation = self._get_obs()
         return observation, {}      # no info dictionary needed for now
     
@@ -105,42 +126,46 @@ class SmartMeterWorld(gym.Env):
         Returns:
             tuple: (observation, reward, terminated, truncated, info)
         """
-        # Apply the action to the battery
+        # Get the action from the agent
         power_kw_normalized = action[0]
         power_kw = self.battery.compute_unnormalized_charge(power_kw_normalized)  # convert normalized action to kW
 
         # compute the duration of the step in seconds
-        if self.current_step < len(self.aggregate_load) - 1:
-            duration = self.aggregate_load.iloc[self.current_step + 1]['timestamp'] - self.aggregate_load.iloc[self.current_step]['timestamp']      # timestamp is in seconds as unit
+        if self.current_step < len(self.aggregate_load_df) - 1:
+            duration = self.aggregate_load_df.iloc[self.current_step + 1]['timestamp'] - self.aggregate_load_df.iloc[self.current_step]['timestamp']      # timestamp is in seconds as unit
         else:
             duration = 6
         
+        # before applying the action, update the battery state of charge in the dataframe
+        self.aggregate_load_df.iat[self.current_step, self.aggregate_load_df.columns.get_loc('battery_soc')] = self.battery.get_state_of_charge()
+
         # Apply the action to the battery
         self.battery.charge(power_kw, duration=duration)
 
         # compute grid load
-        z_t = self.aggregate_load.iloc[self.current_step]['aggregate']  + power_kw * 1000   # convert kW to W
+        z_t = self.aggregate_load_df.iloc[self.current_step]['aggregate']  + power_kw * 1000   # convert kW to W
         z_t = np.clip(z_t, 0, None)  # ensure grid load is non-negative
+        self.aggregate_load_df.iat[self.current_step, self.aggregate_load_df.columns.get_loc('grid_load')] = z_t  # update the grid load in the dataframe
 
         # reward function
         # TODO: proofread later
 
         g_reward = self._g_reward(
-            s_t_datetime=self.aggregate_load.iloc[self.current_step]['datetime'],
-            s_t_plus_1_datetime=self.aggregate_load.iloc[self.current_step + 1]['datetime'],
+            s_t_datetime=self.aggregate_load_df.iloc[self.current_step]['datetime'],
+            s_t_plus_1_datetime=self.aggregate_load_df.iloc[self.current_step + 1]['datetime'],
             power_kw=power_kw
         )
 
         f_reward = self._f_reward(
-            y_t=self.aggregate_load.iloc[self.current_step]['aggregate'],
+            y_t=self.aggregate_load_df.iloc[self.current_step]['aggregate'],
             z_t=z_t,
-            y_t_plus_1=self.aggregate_load.iloc[self.current_step + 1]['aggregate']
+            y_t_plus_1=self.aggregate_load_df.iloc[self.current_step + 1]['aggregate']
         )
 
         reward = (1 - self.reward_lambda) * g_reward + self.reward_lambda * f_reward
 
         # determine termination condition
-        terminated = self.current_step >= len(self.aggregate_load) - 1
+        terminated = self.current_step >= len(self.aggregate_load_df) - 1 - 1      # -1 because we want to stop before the last step to avoid index out of range
 
         if not terminated:
             # Update the current step
@@ -259,9 +284,10 @@ class SmartMeterWorld(gym.Env):
 
             loss = self.h_network_criterion(mean, h_network_target, var=torch.ones_like(mean))  # assuming unit variance
             
-        # Return the negative loss (as small is better) as the reward
+        # Return the loss (as larger is better) as the reward
+        # TODO: negative the loss or not?
         return -loss.item()
-            
+
 
     def set_h_network(self, h_network):
         """
@@ -279,5 +305,44 @@ class SmartMeterWorld(gym.Env):
         """
         self.h_network_stdscaler = h_network_stdscaler
 
+    def render(self):
+        """
+        Render the environment as a line plot, showing the aggregate load and battery state of charge.
+        """
+        if self.render_mode == "human":
+            self._plot_graphs()
+
+    # TODO: I hope I can render per-step on a new window. The new window should be opened in a separate thread/application
+    # then we can establish a TCP/ other connection the new thread
+    # the new thread will be responsible for rendering the environment, by creating a new QT window, and updating the plot
+    # and the main thread will be responsible for running the RL algorithm and updating the environment state
+    def _plot_graphs(self):
+        """
+        Plot the graphs for the environment.
+        """
+        fig, ax = plt.subplots(2, 1, figsize=(12, 8))
+
+        # Plot the aggregate load
+        ax[0].set_title("Grid Load and User Load")
+        ax[0].set_xlabel("Time")
+        ax[0].set_ylabel("Load (kW)")
+        sns.lineplot(data=self.aggregate_load_df, x='datetime', y='grid_load', ax=ax[0], label="Grid Load")
+        sns.lineplot(data=self.aggregate_load_df, x='datetime', y='aggregate', ax=ax[0], label="User Load")
+        ax[0].legend()
+
+        # Plot the battery state of charge
+        ax[1].set_title(f"Battery State of Charge (Max capacity: {self.battery.capacity} kWh)")
+        ax[1].set_xlabel("Time")
+        ax[1].set_ylabel("State of Charge (%)")
+        sns.lineplot(data=self.aggregate_load_df, x='datetime', y='battery_soc', ax=ax[1], label="Battery SOC")
+        ax[1].legend()
+        ax[1].set_xlim(self.aggregate_load_df['datetime'].min(), self.aggregate_load_df['datetime'].max())
+        ax[1].set_ylim(0, 1.1)
+
+        fig.tight_layout()
+        fig.show()
+        
+        # self.window.update_plot(fig)
+        
 
     # TODO: close(self) method for closing any open resources used by the env
