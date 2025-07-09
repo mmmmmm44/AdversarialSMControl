@@ -11,8 +11,8 @@ import seaborn as sns
 
 from render_window import RenderWindow
 
-
 from battery import RechargeableBattery
+from utils import print_log
 
 class SmartMeterWorld(gym.Env):
     """
@@ -22,8 +22,14 @@ class SmartMeterWorld(gym.Env):
 
     metadata = {"render_modes": ["human"], "render_fps": 4}
 
-    def __init__(self, aggregate_load_df: pd.DataFrame, rb_config: Optional[dict] = None, render_mode=None):
+    def __init__(self, aggregate_load_df: pd.DataFrame, rb_config: Optional[dict] = None, render_mode=None, render_host='127.0.0.1', render_port=50007):
         super(SmartMeterWorld, self).__init__()
+
+        # TCP client for real-time rendering
+        self.render_host = render_host
+        self.render_port = render_port
+        self.render_client_socket = None
+        self.render_connected = False
 
         self.aggregate_load_df = aggregate_load_df.copy()
         self.aggregate_load_df['grid_load'] = None  # add a new column for grid load
@@ -74,10 +80,21 @@ class SmartMeterWorld(gym.Env):
         assert render_mode is None or render_mode in self.metadata["render_modes"]
         self.render_mode = render_mode
         if self.render_mode == "human":
-            # self.window = RenderWindow(title="Smart Meter World Visualization")
-            # self.window.show()
+            # plt.ion()  # Enable interactive mode for matplotlib
+            # Try to connect to the render server
+            self._init_render_client()
 
-            plt.ion()  # Enable interactive mode for matplotlib
+            print_log(f"[SmartMeterWorld] Render mode set to '{self.render_mode}'. Render server at {self.render_host}:{self.render_port}. render_connected: {self.render_connected}. render_client_socket: {self.render_client_socket}")
+
+    def _init_render_client(self):
+        import socket
+        try:
+            self.render_client_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            self.render_client_socket.connect((self.render_host, self.render_port))
+            self.render_connected = True
+        except Exception as e:
+            print_log(f"[SmartMeterWorld] Could not connect to render server: {e}")
+            self.render_connected = False
 
     def _get_obs(self):
         """
@@ -308,41 +325,41 @@ class SmartMeterWorld(gym.Env):
     def render(self):
         """
         Render the environment as a line plot, showing the aggregate load and battery state of charge.
+        If render_mode is 'human', send the figure to the render server via TCP.
         """
         if self.render_mode == "human":
-            self._plot_graphs()
+            self._plot_graphs(send_tcp=True)
 
     # TODO: I hope I can render per-step on a new window. The new window should be opened in a separate thread/application
     # then we can establish a TCP/ other connection the new thread
     # the new thread will be responsible for rendering the environment, by creating a new QT window, and updating the plot
     # and the main thread will be responsible for running the RL algorithm and updating the environment state
-    def _plot_graphs(self):
+    def _plot_graphs(self, send_tcp=False):
         """
-        Plot the graphs for the environment.
+        Instead of plotting, send the latest data as a JSON dict to the render window if send_tcp is True.
         """
-        fig, ax = plt.subplots(2, 1, figsize=(12, 8))
+        import json
 
-        # Plot the aggregate load
-        ax[0].set_title("Grid Load and User Load")
-        ax[0].set_xlabel("Time")
-        ax[0].set_ylabel("Load (kW)")
-        sns.lineplot(data=self.aggregate_load_df, x='datetime', y='grid_load', ax=ax[0], label="Grid Load")
-        sns.lineplot(data=self.aggregate_load_df, x='datetime', y='aggregate', ax=ax[0], label="User Load")
-        ax[0].legend()
+        if send_tcp and self.render_connected and self.render_client_socket:
+            try:
+                dt = self.aggregate_load_df['datetime'].iat[self.current_step - 1]
+                user_load = self.aggregate_load_df['aggregate'].iat[self.current_step - 1]
+                grid_load = self.aggregate_load_df['grid_load'].iat[self.current_step - 1]
+                battery_soc = self.aggregate_load_df['battery_soc'].iat[self.current_step - 1]
 
-        # Plot the battery state of charge
-        ax[1].set_title(f"Battery State of Charge (Max capacity: {self.battery.capacity} kWh)")
-        ax[1].set_xlabel("Time")
-        ax[1].set_ylabel("State of Charge (%)")
-        sns.lineplot(data=self.aggregate_load_df, x='datetime', y='battery_soc', ax=ax[1], label="Battery SOC")
-        ax[1].legend()
-        ax[1].set_xlim(self.aggregate_load_df['datetime'].min(), self.aggregate_load_df['datetime'].max())
-        ax[1].set_ylim(0, 1.1)
-
-        fig.tight_layout()
-        fig.show()
-        
-        # self.window.update_plot(fig)
-        
-
-    # TODO: close(self) method for closing any open resources used by the env
+                data_dict = {
+                    'timestamp': dt.isoformat() if not pd.isnull(dt) else None,
+                    'user_load': float(user_load) if user_load is not None else None,
+                    'grid_load': float(grid_load) if grid_load is not None else None,
+                    'battery_soc': float(battery_soc) if battery_soc is not None else None
+                }
+                import pprint
+                print_log(f"[SmartMeterWorld] Sending data: {pprint.pformat(data_dict)}")
+                import struct
+                json_data = json.dumps(data_dict).encode('utf-8')
+                msg_len = struct.pack('>I', len(json_data))
+                self.render_client_socket.sendall(msg_len + json_data)
+            except Exception as e:
+                print_log(f"[SmartMeterWorld] Failed to send data to render server: {e}")
+        # No plotting here; plotting is now handled by the render window
+        return None
