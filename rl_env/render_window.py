@@ -1,4 +1,4 @@
-from PySide6.QtWidgets import QWidget, QVBoxLayout, QApplication
+from PySide6.QtWidgets import QWidget, QVBoxLayout, QApplication, QLabel
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg, NavigationToolbar2QT
 from matplotlib.figure import Figure
 from PySide6.QtCore import QTimer
@@ -9,13 +9,26 @@ import socket
 import threading
 from collections import deque
 from datetime import datetime
+from enum import Enum
+import json
+import struct
 
 import sys
 sys.path.append(".")  # Adjust path to import utils from parent directory
 from utils import print_log
 
+class RenderWindowControl(Enum):
+    RESET = 0       # reset the window & buffers
+    SAVE_GRAPH = 1  # save the current graph
+    CLOSE = 98      # close the connection. Open for new connection
+    TERMINATE = 99  # terminate the server and close the window
+
+class RenderWindowMessageType(Enum):
+    DATA = 0       # data message containing the payload
+    CONTROL = 1    # control message containing the command and payload
+
 class RenderWindow(QWidget):
-    def __init__(self, parent=None, title="Render Window"):
+    def __init__(self, parent=None, title="Render Window", host='127.0.0.1', port=50007):
         super(RenderWindow, self).__init__(parent)
         self.setWindowTitle(title)
 
@@ -23,7 +36,7 @@ class RenderWindow(QWidget):
         layout = QVBoxLayout(self)
         
         # Create a matplotlib figure and canvas
-        self.figure = Figure()
+        self.figure = Figure(figsize=(10, 10), dpi=150)
         self.canvas = FigureCanvasQTAgg(self.figure)
 
         # Add the canvas to the layout
@@ -32,6 +45,10 @@ class RenderWindow(QWidget):
         # Add a navigation toolbar
         self.toolbar = NavigationToolbar2QT(self.canvas, self)
         layout.addWidget(self.toolbar)
+
+        # Add a status label at the bottom
+        self.status_label = QLabel(f"Open for connection: {host}:{port}")
+        layout.addWidget(self.status_label)
 
         self.setLayout(layout)
 
@@ -46,10 +63,14 @@ class RenderWindow(QWidget):
         self.timer.timeout.connect(self.update_plot)
         self.timer.start(200)  # 5 Hz
 
+    def set_status(self, text):
+        # Thread-safe update of the status label using QMetaObject.invokeMethod
+        from PySide6.QtCore import Qt, QMetaObject, Q_ARG
+        QMetaObject.invokeMethod(self.status_label, "setText", Qt.QueuedConnection, Q_ARG(str, text))
+        print_log(f"[RenderWindow] Status updated: {text}")
+
     def push_data(self, data_dict):
         """Push new data from the environment into the deques. Handles both single values and lists."""
-        # Debug print
-        print(f"[RenderWindow] push_data received: {data_dict}")
 
         def _append_or_extend(deq, val):
             if isinstance(val, list):
@@ -57,7 +78,7 @@ class RenderWindow(QWidget):
             elif val is not None:
                 deq.append(val)
 
-        # convert the timestamp to a datetime object if it's a string
+        # convert the timestamp to a datetime object
         if isinstance(data_dict.get('timestamp'), list):
             new_timestamps = []
             for ts in data_dict['timestamp']:
@@ -104,13 +125,30 @@ class RenderWindow(QWidget):
             ax2.plot(t, soc, label="Battery SOC")
             ax2.set_title("Battery State of Charge")
             ax2.set_xlabel("Time")
-            ax2.set_ylabel("State of Charge (%)")
+            ax2.set_ylabel("Normalized State of Charge")
             ax2.legend()
             ax2.set_ylim(0, 1.1)
             self.figure.tight_layout()
         except Exception as e:
             print(f"[RenderWindow] Plotting error: {e}")
         self.canvas.draw()
+
+    def reset_buffers(self):
+        self.datetimes.clear()
+        self.user_load.clear()
+        self.grid_load.clear()
+        self.battery_soc.clear()
+        print_log("[RenderWindow] Buffers reset.")
+        self.set_status("Buffers are reset")
+
+    def save_graph(self, path):
+        try:
+            self.figure.savefig(path)
+            print_log(f"[RenderWindow] Graph saved to {path}")
+            self.set_status(f"Graph is saved to {path}")
+        except Exception as e:
+            print_log(f"[RenderWindow] Failed to save graph: {e}")
+            self.set_status(f"Failed to save graph: {e}")
 
 
 # TCP server to receive matplotlib figures and update the GUI
@@ -125,14 +163,16 @@ class RenderServer:
         self.server_socket.listen(1)
         self.thread = threading.Thread(target=self.listen, daemon=True)
         self.thread.start()
+        if self.window:
+            self.window.set_status(f"Open for connection: {self.host}:{self.port}")
 
     def listen(self):
-        import json
-        import struct
-        print(f"[RenderServer] Listening on {self.host}:{self.port}")
+        print_log(f"[RenderServer] Listening on {self.host}:{self.port}")
         while True:
             conn, addr = self.server_socket.accept()
             print_log(f"[RenderServer] Connection from {addr}")
+            if self.window:
+                self.window.set_status(f"Connected with {addr[0]}:{addr[1]}")
             try:
                 while True:
                     # Read 4 bytes for the message length
@@ -155,11 +195,34 @@ class RenderServer:
                     if not data:
                         break
                     # decode and parse JSON
-                    data_dict = json.loads(data.decode('utf-8'))
-                    print_log(f"[RenderServer] Received data: {data_dict}")
-                    if self.window:
-                        self.window.push_data(data_dict)
+                    msg = json.loads(data.decode('utf-8'))
+                    print_log(f"[RenderServer] Received message: {msg}")
+                    if not isinstance(msg, dict) or 'type' not in msg:
+                        continue
+                    if msg['type'] == RenderWindowMessageType.DATA.name.lower() and self.window:
+                        self.window.push_data(msg['payload'])
                         print_log(f"[RenderServer] Data pushed to window.")
+                    elif msg['type'] == RenderWindowMessageType.CONTROL.name.lower():
+                        cmd = msg.get('command')
+                        payload = msg.get('payload', {})
+                        if cmd == RenderWindowControl.RESET.name and self.window:
+                            self.window.reset_buffers()
+                        elif cmd == RenderWindowControl.SAVE_GRAPH.name and self.window:
+                            path = payload.get('path')
+                            if path:
+                                self.window.save_graph(path)
+                        elif cmd == RenderWindowControl.CLOSE.name:
+                            print_log("[RenderServer] CLOSE command received. Closing connection.")
+                            if self.window:
+                                self.window.set_status(f"Closed connection with {addr[0]}:{addr[1]}")
+                            break  # Close this connection, but keep server running
+                        elif cmd == RenderWindowControl.TERMINATE.name:
+                            print_log("[RenderServer] TERMINATE command received. Exiting application.")
+                            if self.window:
+                                self.window.set_status("Render window terminated.")
+                                self.window.close()
+                            conn.close()
+                            sys.exit(0)
             except Exception as e:
                 print_log(f"[RenderServer] Error parsing data: {e}")
             conn.close()
@@ -167,10 +230,12 @@ class RenderServer:
 
 def main():
     app = QApplication(sys.argv)
-    window = RenderWindow()
+    host = '127.0.0.1'
+    port = 50007
+    window = RenderWindow(host=host, port=port)
     window.show()
     # Start the TCP server
-    server = RenderServer(window=window)
+    server = RenderServer(host=host, port=port, window=window)
     sys.exit(app.exec())
     # close the server socket when the application exits
     server.server_socket.close()

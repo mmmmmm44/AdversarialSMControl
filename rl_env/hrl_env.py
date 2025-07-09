@@ -4,12 +4,12 @@ import gymnasium as gym
 import pandas as pd
 from datetime import datetime, timedelta, timezone, time
 from collections import deque
+import struct
+import json
 
 import torch
-import matplotlib.pyplot as plt
-import seaborn as sns
 
-from render_window import RenderWindow
+from render_window import RenderWindowControl, RenderWindowMessageType
 
 from battery import RechargeableBattery
 from utils import print_log
@@ -20,7 +20,7 @@ class SmartMeterWorld(gym.Env):
     This environment simulates a energy management unit connected with a rechargeable battery.
     """
 
-    metadata = {"render_modes": ["human"], "render_fps": 4}
+    metadata = {"render_modes": ["human"]}
 
     def __init__(self, aggregate_load_df: pd.DataFrame, rb_config: Optional[dict] = None, render_mode=None, render_host='127.0.0.1', render_port=50007):
         super(SmartMeterWorld, self).__init__()
@@ -330,36 +330,74 @@ class SmartMeterWorld(gym.Env):
         if self.render_mode == "human":
             self._plot_graphs(send_tcp=True)
 
-    # TODO: I hope I can render per-step on a new window. The new window should be opened in a separate thread/application
-    # then we can establish a TCP/ other connection the new thread
-    # the new thread will be responsible for rendering the environment, by creating a new QT window, and updating the plot
-    # and the main thread will be responsible for running the RL algorithm and updating the environment state
+    def _send_json_message(self, message: dict):
+        """ Send a JSON message to the render server.
+        Args:
+            message (dict): The message to send, should contain 'type' and 'payload'.
+        """
+        if self.render_connected and self.render_client_socket:
+            try:
+                json_data = json.dumps(message).encode('utf-8')
+                msg_len = struct.pack('>I', len(json_data))     # include a 4-byte length prefix to tell the render server how long the message is (for TCP stream)
+                self.render_client_socket.sendall(msg_len + json_data)
+            except Exception as e:
+                print_log(f"[SmartMeterWorld] Failed to send message to render server: {e}")
+
     def _plot_graphs(self, send_tcp=False):
         """
         Instead of plotting, send the latest data as a JSON dict to the render window if send_tcp is True.
         """
-        import json
-
         if send_tcp and self.render_connected and self.render_client_socket:
-            try:
-                dt = self.aggregate_load_df['datetime'].iat[self.current_step - 1]
-                user_load = self.aggregate_load_df['aggregate'].iat[self.current_step - 1]
-                grid_load = self.aggregate_load_df['grid_load'].iat[self.current_step - 1]
-                battery_soc = self.aggregate_load_df['battery_soc'].iat[self.current_step - 1]
-
-                data_dict = {
+            dt = self.aggregate_load_df['datetime'].iat[self.current_step - 1]
+            user_load = self.aggregate_load_df['aggregate'].iat[self.current_step - 1]
+            grid_load = self.aggregate_load_df['grid_load'].iat[self.current_step - 1]
+            battery_soc = self.aggregate_load_df['battery_soc'].iat[self.current_step - 1]
+            message = {
+                'type': RenderWindowMessageType.DATA.name.lower(),
+                'payload': {
                     'timestamp': dt.isoformat() if not pd.isnull(dt) else None,
                     'user_load': float(user_load) if user_load is not None else None,
                     'grid_load': float(grid_load) if grid_load is not None else None,
                     'battery_soc': float(battery_soc) if battery_soc is not None else None
                 }
-                import pprint
-                print_log(f"[SmartMeterWorld] Sending data: {pprint.pformat(data_dict)}")
-                import struct
-                json_data = json.dumps(data_dict).encode('utf-8')
-                msg_len = struct.pack('>I', len(json_data))
-                self.render_client_socket.sendall(msg_len + json_data)
+            }
+            self._send_json_message(message)
+
+    def _send_control_message(self, command, payload=None):
+        """Send a control message to the render window."""
+        message = {
+            'type': RenderWindowMessageType.CONTROL.name.lower(),
+            'command': command,
+        }
+        if payload is not None:
+            message['payload'] = payload
+        self._send_json_message(message)
+
+    def save_graph(self, path:str):
+        """Request the render window to save the current graph to the given path."""
+        self._send_control_message(RenderWindowControl.SAVE_GRAPH.name, {'path': path})
+
+    def reset_render_window(self):
+        """Request the render window to reset (clear) all buffers."""
+        self._send_control_message(RenderWindowControl.RESET.name)
+
+    def close(self):
+        """
+        Close the environment and the render client socket if it exists. Also notify the render window.
+        """
+        if self.render_client_socket:
+            self._send_control_message(RenderWindowControl.CLOSE.name)
+
+            try:
+                self.render_client_socket.close()
             except Exception as e:
-                print_log(f"[SmartMeterWorld] Failed to send data to render server: {e}")
-        # No plotting here; plotting is now handled by the render window
-        return None
+                print_log(f"[SmartMeterWorld] Error closing render client socket: {e}")
+            self.render_client_socket = None
+            self.render_connected = False
+
+        print_log("[SmartMeterWorld] Environment closed.")
+
+    def terminate_render_window(self):
+        """Request the render window to terminate itself. This will also close the render client socket."""
+        self._send_control_message(RenderWindowControl.CLOSE.name)
+        self._send_control_message(RenderWindowControl.TERMINATE.name)
