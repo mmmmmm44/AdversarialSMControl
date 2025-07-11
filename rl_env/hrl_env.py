@@ -68,11 +68,11 @@ class SmartMeterWorld(gym.Env):
 
         self.action_space = self.low_level_action_space
 
-        self.reward_lambda = 0.5  # lambda for the reward function, can be tuned
+        self.reward_lambda = 0.1        # value between [0,1]. Closer to zero -> more privacy focused
 
         self.h_network = None  # Placeholder for H-network, to be loaded or trained
         self.h_network_stdscaler = None  # Placeholder for H-network standard scaler, to be loaded or trained
-        self.h_network_criterion = torch.nn.GaussianNLLLoss()  # loss function as the privacy signal
+        self.h_network_criterion = torch.nn.GaussianNLLLoss(reduction='sum')  # loss function as the privacy signal. Using sum mode
         self.h_network_inference_buffer = deque(maxlen=512)  # Buffer for H-network inference, to store recent pair of input (z_t, y_t) and desired target (y_{t+1})
 
 
@@ -167,19 +167,20 @@ class SmartMeterWorld(gym.Env):
         # reward function
         # TODO: proofread later
 
-        g_reward = self._g_reward(
+        g_signal = self._g_signal(
             s_t_datetime=self.aggregate_load_df.iloc[self.current_step]['datetime'],
             s_t_plus_1_datetime=self.aggregate_load_df.iloc[self.current_step + 1]['datetime'],
             power_kw=power_kw
         )
 
-        f_reward = self._f_reward(
+        f_signal = self._f_signal(
             y_t=self.aggregate_load_df.iloc[self.current_step]['aggregate'],
             z_t=z_t,
             y_t_plus_1=self.aggregate_load_df.iloc[self.current_step + 1]['aggregate']
         )
 
-        reward = (1 - self.reward_lambda) * g_reward + self.reward_lambda * f_reward
+        # reward function is the negative of loss signal
+        reward = - (self.reward_lambda * g_signal + (1 - self.reward_lambda) * f_signal)
 
         # determine termination condition
         terminated = self.current_step >= len(self.aggregate_load_df) - 1 - 1      # -1 because we want to stop before the last step to avoid index out of range
@@ -207,18 +208,18 @@ class SmartMeterWorld(gym.Env):
             dt.month / 12.0 - 0.5  # Month normalized
         ], dtype=np.float32)
 
-    def _g_reward(self, s_t_datetime:datetime, s_t_plus_1_datetime:datetime, power_kw: float) -> float:
+    def _g_signal(self, s_t_datetime:datetime, s_t_plus_1_datetime:datetime, power_kw: float) -> float:
         """
-        Calculate the reward based on elapsed time, power used, and cost.
+        Calculate the cost signal based on elapsed time and power used.
         Args:
             s_t_datetime (datetime): Current timestamp.
             s_t_plus_1_datetime (datetime): Next timestamp.
             power_kw (float): Power used in kW.
         Returns:
-            float: Calculated reward.
+            float: Calculated cost signal.
         """
 
-        # Reward is negative of cost incurred
+        # return cost incurred for the power used in the time period
         return self._get_weighted_electricity_cost(s_t_datetime, s_t_plus_1_datetime) * power_kw
     
     def _get_weighted_electricity_cost(self, s_t_datetime: datetime, s_t_plus_1_datetime: datetime) -> float:
@@ -256,7 +257,7 @@ class SmartMeterWorld(gym.Env):
         return total_cost
 
     
-    def _f_reward(self, y_t: float, z_t: float, y_t_plus_1: float) -> float:
+    def _f_signal(self, y_t: float, z_t: float, y_t_plus_1: float) -> float:
         """
         Calculate the H-network reward based on the user's load and load received from the grid
         Args:
@@ -301,8 +302,7 @@ class SmartMeterWorld(gym.Env):
 
             loss = self.h_network_criterion(mean, h_network_target, var=torch.ones_like(mean))  # assuming unit variance
             
-        # Return the loss (as larger is better) as the reward
-        # TODO: negative the loss or not?
+        # return the loss, as this approximates \sum_{t=1}^{T-1} log(p(y_t_plus_1 | z_t, y_t)) -> approximates the Mutual Information (MI)
         return -loss.item()
 
 
