@@ -1,3 +1,4 @@
+from copy import deepcopy
 from PySide6.QtWidgets import QWidget, QVBoxLayout, QApplication, QLabel
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg, NavigationToolbar2QT
 from matplotlib.figure import Figure
@@ -119,7 +120,7 @@ class RenderWindow(QWidget):
             ax1.set_title("Grid Load and User Load")
             ax1.set_xlabel("Time")
             ax1.set_ylabel("Load (W)")
-            ax1.set_ylim(0, 5000)  # Adjust y-axis limit as needed
+            ax1.set_ylim(0, 8200)  # Adjust y-axis limit as needed
             ax1.legend()
             # Plot battery SOC
             ax2.plot(t, soc, label="Battery SOC")
@@ -143,9 +144,12 @@ class RenderWindow(QWidget):
 
     def save_graph(self, path):
         try:
-            self.figure.savefig(path)
+            curr_graph = deepcopy(self.figure)      # deepcopy to keep the current graph, as it will be re-drawn regularly
+            curr_graph.savefig(path)
             print_log(f"[RenderWindow] Graph saved to {path}")
             self.set_status(f"Graph is saved to {path}")
+
+            del curr_graph  # Free memory
         except Exception as e:
             print_log(f"[RenderWindow] Failed to save graph: {e}")
             self.set_status(f"Failed to save graph: {e}")
