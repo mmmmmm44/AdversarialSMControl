@@ -11,9 +11,70 @@ import torch
 from torch.utils.data import DataLoader, TensorDataset
 
 from render_window import RenderWindowControl, RenderWindowMessageType
-
+from env_data_loader import SmartMeterDataLoader
 from battery import RechargeableBattery
 from utils import print_log
+
+class SmartMeterEpisode:
+    """
+    Represents a single episode in the Smart Meter World environment.
+    Contains the aggregate load data, battery state, and other relevant information.
+    """
+    def __init__(self, selected_aggregate_load_df: pd.DataFrame):
+        self.df = selected_aggregate_load_df.copy()
+        self.df['grid_load'] = None  # add a new column for grid load
+        self.df['battery_soc'] = None  # add a new column for battery state of charge
+
+        self.current_step = 0  # Current step in the episode
+
+    def reset(self, selected_aggregate_load_df: pd.DataFrame):
+        """
+        Reset the episode with a new aggregate load DataFrame.
+        Args:
+            selected_aggregate_load_df (pd.DataFrame): The DataFrame containing aggregate load data for the episode.
+        """
+        self.df = selected_aggregate_load_df.copy()
+        self.df['grid_load'] = None
+        self.df['battery_soc'] = None
+        self.current_step = 0
+
+    def get_current_step(self) -> int:
+        """
+        Get the current step in the episode.
+        Returns:
+            int: The current step index.
+        """
+        return self.current_step
+    
+    def set_current_step(self, step: int):
+        """
+        Set the current step in the episode.
+        Args:
+            step (int): The step index to set.
+        """
+        if step < 0 or step >= len(self.df):
+            raise ValueError("Step index out of bounds.")
+        self.current_step = step
+        
+    def get_episode_length(self) -> int:
+        """
+        Get the length of the episode.
+        Returns:
+            int: The number of steps in the episode.
+        """
+        return len(self.df)
+    
+    def get_episode_info(self) -> dict:
+        """
+        Get information about the episode.
+        Returns:
+            dict: A dictionary containing episode information such as length and current step.
+        """
+        return {
+            "length": self.get_episode_length(),
+            "datetime_range": (self.df['datetime'].min(), self.df['datetime'].max()),
+        }
+   
 
 class SmartMeterWorld(gym.Env):
     """
@@ -23,7 +84,7 @@ class SmartMeterWorld(gym.Env):
 
     metadata = {"render_modes": ["human"]}
 
-    def __init__(self, aggregate_load_df: pd.DataFrame, rb_config: Optional[dict] = None, render_mode=None, render_host='127.0.0.1', render_port=50007):
+    def __init__(self, smart_meter_data_loader: SmartMeterDataLoader, rb_config: Optional[dict] = None, render_mode=None, render_host='127.0.0.1', render_port=50007):
         super(SmartMeterWorld, self).__init__()
 
         # TCP client for real-time rendering
@@ -32,9 +93,12 @@ class SmartMeterWorld(gym.Env):
         self.render_client_socket = None
         self.render_connected = False
 
-        self.aggregate_load_df = aggregate_load_df.copy()
-        self.aggregate_load_df['grid_load'] = None  # add a new column for grid load
-        self.aggregate_load_df['battery_soc'] = None  # add a new column for battery state of charge
+        self.smart_meter_data_loader = smart_meter_data_loader
+        if not self.smart_meter_data_loader:
+            raise ValueError("No SmartMeterDataLoader provided.")
+
+        # initialize an episode
+        self.episode = SmartMeterEpisode(self.smart_meter_data_loader.get_aggregate_load_segment(0))  # start with the first DataFrame
 
         # Initialize battery state
         self.battery = RechargeableBattery(**rb_config) if rb_config else RechargeableBattery(
@@ -44,8 +108,6 @@ class SmartMeterWorld(gym.Env):
                 efficiency=1.0,  # 100% efficiency
                 init_soc=0.5  # 50% initial state of charge
         )
-
-        self.current_step = 0
 
         # define state space and action space
         self.observation_space = gym.spaces.Dict({
@@ -104,9 +166,11 @@ class SmartMeterWorld(gym.Env):
         Returns:
             dict: Current state observation including aggregate load, battery state of charge, and timestamp features.
         """
+        current_step = self.episode.get_current_step()
+
         soc = self.battery.get_state_of_charge()
-        current_load = self.aggregate_load_df.iloc[self.current_step]['aggregate']
-        timestamp = self.aggregate_load_df.iloc[self.current_step]['timestamp']
+        current_load = self.episode.df.iloc[current_step]['aggregate']
+        timestamp = self.episode.df.iloc[current_step]['timestamp']
         timestamp_features = self._create_timestamp_features(timestamp)
 
         return {
@@ -125,13 +189,16 @@ class SmartMeterWorld(gym.Env):
             dict: Initial observation of the environment.
         """
         super().reset(seed=seed, options=options)
-        self.current_step = 0
+
         self.battery.reset(self.np_random.uniform(0.0, 1.0))    # randomize the battery state of charge
 
-        self.h_network_inference_buffer.clear()  # Clear the inference buffer for H-network
+        # randomly select an aggregate load DataFrame from the list
+        selected_idx = self.np_random.integers(0, self.smart_meter_data_loader.get_divided_segments_length())
+        self.episode.reset(self.smart_meter_data_loader.get_aggregate_load_segment(selected_idx))  # Reset with a new episode
 
-        self.aggregate_load_df['grid_load'] = None  # Reset grid load column
-        self.aggregate_load_df['battery_soc'] = None  # Reset battery state of charge column
+        print_log(f"[SmartMeterWorld] Resetting environment with a new episode. Episode info: {self.episode.get_episode_info()}")
+
+        self.h_network_inference_buffer.clear()  # Clear the inference buffer for H-network
 
         observation = self._get_obs()
         return observation, {}      # no info dictionary needed for now
@@ -145,51 +212,54 @@ class SmartMeterWorld(gym.Env):
         Returns:
             tuple: (observation, reward, terminated, truncated, info)
         """
+
+        current_step = self.episode.get_current_step()
+
         # Get the action from the agent
         power_kw_normalized = action[0]
         power_kw = self.battery.compute_unnormalized_charge(power_kw_normalized)  # convert normalized action to kW
 
         # compute the duration of the step in seconds
-        if self.current_step < len(self.aggregate_load_df) - 1:
-            duration = self.aggregate_load_df.iloc[self.current_step + 1]['timestamp'] - self.aggregate_load_df.iloc[self.current_step]['timestamp']      # timestamp is in seconds as unit
+        if current_step < self.episode.get_episode_length() - 1:
+            duration = self.episode.df.iloc[current_step + 1]['timestamp'] - self.episode.df.iloc[current_step]['timestamp']      # timestamp is in seconds as unit
         else:
             duration = 6
         
         # before applying the action, update the battery state of charge in the dataframe
-        self.aggregate_load_df.iat[self.current_step, self.aggregate_load_df.columns.get_loc('battery_soc')] = self.battery.get_state_of_charge()
+        self.episode.df.iat[current_step, self.episode.df.columns.get_loc('battery_soc')] = self.battery.get_state_of_charge()
 
         # Apply the action to the battery
         self.battery.charge(power_kw, duration=duration)
 
         # compute grid load
-        z_t = self.aggregate_load_df.iloc[self.current_step]['aggregate']  + power_kw * 1000   # convert kW to W
+        z_t = self.episode.df.iloc[current_step]['aggregate']  + power_kw * 1000   # convert kW to W
         z_t = np.clip(z_t, 0, None)  # ensure grid load is non-negative
-        self.aggregate_load_df.iat[self.current_step, self.aggregate_load_df.columns.get_loc('grid_load')] = z_t  # update the grid load in the dataframe
+        self.episode.df.iat[current_step, self.episode.df.columns.get_loc('grid_load')] = z_t  # update the grid load in the dataframe
 
         # reward function
         # TODO: proofread later
 
         g_signal = self._g_signal(
-            s_t_datetime=self.aggregate_load_df.iloc[self.current_step]['datetime'],
-            s_t_plus_1_datetime=self.aggregate_load_df.iloc[self.current_step + 1]['datetime'],
+            s_t_datetime=self.episode.df.iloc[current_step]['datetime'],
+            s_t_plus_1_datetime=self.episode.df.iloc[current_step + 1]['datetime'],
             power_kw=power_kw
         )
 
         f_signal = self._f_signal(
-            y_t=self.aggregate_load_df.iloc[self.current_step]['aggregate'],
+            y_t=self.episode.df.iloc[current_step]['aggregate'],
             z_t=z_t,
-            y_t_plus_1=self.aggregate_load_df.iloc[self.current_step + 1]['aggregate']
+            y_t_plus_1=self.episode.df.iloc[current_step + 1]['aggregate']
         )
 
         # reward function is the negative of loss signal
         reward = - (self.reward_lambda * g_signal + (1 - self.reward_lambda) * f_signal)
 
         # determine termination condition
-        terminated = self.current_step >= len(self.aggregate_load_df) - 1 - 1      # -1 because we want to stop before the last step to avoid index out of range
+        terminated = current_step >= self.episode.get_episode_length() - 1 - 1      # -1 because we want to stop before the last step to avoid index out of range
 
         if not terminated:
             # Update the current step
-            self.current_step += 1
+            self.episode.set_current_step(current_step + 1)
 
         return self._get_obs(), reward, terminated, False, {}
 
@@ -441,10 +511,13 @@ class SmartMeterWorld(gym.Env):
         Instead of plotting, send the latest data as a JSON dict to the render window if send_tcp is True.
         """
         if send_tcp and self.render_connected and self.render_client_socket:
-            dt = self.aggregate_load_df['datetime'].iat[self.current_step - 1]
-            user_load = self.aggregate_load_df['aggregate'].iat[self.current_step - 1]
-            grid_load = self.aggregate_load_df['grid_load'].iat[self.current_step - 1]
-            battery_soc = self.aggregate_load_df['battery_soc'].iat[self.current_step - 1]
+
+            current_step = self.episode.get_current_step()
+
+            dt = self.episode.df['datetime'].iat[current_step - 1]
+            user_load = self.episode.df['aggregate'].iat[current_step - 1]
+            grid_load = self.episode.df['grid_load'].iat[current_step - 1]
+            battery_soc = self.episode.df['battery_soc'].iat[current_step - 1]
             message = {
                 'type': RenderWindowMessageType.DATA.name.lower(),
                 'payload': {
