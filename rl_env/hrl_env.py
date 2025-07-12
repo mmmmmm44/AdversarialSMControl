@@ -8,6 +8,7 @@ import struct
 import json
 
 import torch
+from torch.utils.data import DataLoader, TensorDataset
 
 from render_window import RenderWindowControl, RenderWindowMessageType
 
@@ -72,8 +73,9 @@ class SmartMeterWorld(gym.Env):
 
         self.h_network = None  # Placeholder for H-network, to be loaded or trained
         self.h_network_stdscaler = None  # Placeholder for H-network standard scaler, to be loaded or trained
-        self.h_network_criterion = torch.nn.GaussianNLLLoss(reduction='sum')  # loss function as the privacy signal. Using sum mode
-        self.h_network_inference_buffer = deque(maxlen=512)  # Buffer for H-network inference, to store recent pair of input (z_t, y_t) and desired target (y_{t+1})
+        self.h_network_criterion = torch.nn.GaussianNLLLoss(reduction='none')  # loss function as the privacy signal. Using sum mode
+        self.h_network_inference_buffer = deque()  # Buffer for H-network inference, to store recent pair of input (z_t, y_t) and desired target (y_{t+1})
+        self.H_NETWORK_MAXSEQLEN = 512  # Maximum sequence length for H-network inference buffer
 
 
         # render stuffs
@@ -285,6 +287,7 @@ class SmartMeterWorld(gym.Env):
             if h_network_input[:, i].shape[0] == 1:  # if there is single sample
                 h_network_input[:, i] = self.h_network_stdscaler.transform(h_network_input[:, i].reshape(1, -1)).flatten()
             else:
+                # the reshape is to scale each feature independently
                 h_network_input[:, i] = self.h_network_stdscaler.transform(h_network_input[:, i].reshape(-1, 1)).flatten()
 
         if h_network_target.shape[0] == 1:  # if there is single sample
@@ -292,18 +295,108 @@ class SmartMeterWorld(gym.Env):
         else:
             h_network_target = self.h_network_stdscaler.transform(h_network_target.reshape(-1, 1)).flatten()
 
-        # Convert the buffer to a tensor for H-network input
-        h_network_input = torch.tensor(h_network_input).unsqueeze(0)
-        h_network_target = torch.tensor(h_network_target).unsqueeze(0)
+
+        # Chunk, pad, and mask the input and target sequences, 
+        # break the input and target into chunks if they exceed the maximum sequence length
+        if len(h_network_input) > self.H_NETWORK_MAXSEQLEN:
+            h_network_input, h_network_target, h_network_mask = self._chunk_pad_mask_sequences(
+                h_network_input.reshape(1, -1, 2),  # reshape to (N, T, 2) where N=1 for single sequence
+                h_network_target.reshape(1, -1),  # reshape to (N, T)
+                chunk_size=self.H_NETWORK_MAXSEQLEN,
+                stride=self.H_NETWORK_MAXSEQLEN,
+            )
+        else:
+            # no padding is needed
+            h_network_input, h_network_target, h_network_mask = h_network_input.reshape(1, -1, 2), h_network_target.reshape(1, -1), np.ones(len(h_network_input), dtype=bool).reshape(1, -1)
+            
+            # Convert to torch tensors
+            h_network_input = torch.tensor(h_network_input, dtype=torch.float32)
+            h_network_target = torch.tensor(h_network_target, dtype=torch.float32)
+            h_network_mask = torch.tensor(h_network_mask, dtype=torch.bool)
+
+        # temporary dataloader for H-network inference
+        dataloader = DataLoader(
+            TensorDataset(h_network_input, h_network_target, h_network_mask),
+            batch_size=64,  # Adjust batch size as needed
+            shuffle=False,  # No need to shuffle for inference
+        )
+
+        signal_output = None
 
         # Get the H-network reward
         with torch.no_grad():
-            mean = self.h_network(h_network_input)
+            for batch in dataloader:
+                _input, _target, _mask = batch
 
-            loss = self.h_network_criterion(mean, h_network_target, var=torch.ones_like(mean))  # assuming unit variance
-            
-        # return the loss, as this approximates \sum_{t=1}^{T-1} log(p(y_t_plus_1 | z_t, y_t)) -> approximates the Mutual Information (MI)
-        return -loss.item()
+                mean = self.h_network(_input)
+
+                # Apply the mask to the mean and target
+                mean = mean.view(-1)  # flatten the mean
+                _target = _target.view(-1)  # flatten the target
+                _mask = _mask.view(-1)  # flatten the mask
+
+                mean_masked = torch.masked_select(mean, _mask)  # apply the mask to the mean
+                _target_masked = torch.masked_select(_target, _mask)  # apply the mask to the target
+
+                loss = self.h_network_criterion(mean_masked, _target_masked, var=torch.ones_like(mean_masked))  # assuming unit variance
+
+                # compute likelihood of each sample
+                likelihood = torch.exp(-loss)
+
+                # signal output is expected value of the negative loss
+                signal_output = torch.sum(torch.mul(likelihood, -loss)) if signal_output is None else signal_output + torch.sum(torch.mul(likelihood, -loss))
+
+        # return the loss. This approximates \mathbb{E} \log(p(y_t_plus_1 | z_t, y_t)) -> approximates the Mutual Information (MI)
+        return signal_output.item()
+    
+    def _chunk_pad_mask_sequences(self, input_sequences, target_sequences, chunk_size=512, stride=64, padding_value=0.0):
+        """
+        Chunk, pad, and mask input/target sequences for LSTM training.
+
+        Copied from h_network_training.ipynb
+        Args:
+            input_sequences: list of np.ndarray, each shape (T, 2)
+            target_sequences: list of np.ndarray, each shape (T,)
+            chunk_size: int, length of each chunk
+            stride: int, step size for rolling window
+            padding_value: value to use for padding
+        Returns:
+            padded_inputs: torch.Tensor, shape (N, chunk_size, 2)
+            padded_targets: torch.Tensor, shape (N, chunk_size)
+            mask: torch.BoolTensor, shape (N, chunk_size)
+        """
+        chunked_inputs = []
+        chunked_targets = []
+        chunked_masks = []
+
+        for inp_seq, tgt_seq in zip(input_sequences, target_sequences):
+            seq_len = inp_seq.shape[0]
+            # Rolling window chunking
+            for start in range(0, seq_len, stride):
+                end = start + chunk_size
+                inp_chunk = inp_seq[start:end]
+                tgt_chunk = tgt_seq[start:end]
+                mask = np.zeros(chunk_size, dtype=bool)
+                valid_len = min(chunk_size, seq_len - start)
+                mask[:valid_len] = True
+                # Pad if needed
+                if inp_chunk.shape[0] < chunk_size:
+                    pad_len = chunk_size - inp_chunk.shape[0]
+                    inp_chunk = np.pad(inp_chunk, ((0, pad_len), (0, 0)), mode='constant', constant_values=padding_value)
+                    tgt_chunk = np.pad(tgt_chunk, (0, pad_len), mode='constant', constant_values=padding_value)
+                chunked_inputs.append(torch.tensor(inp_chunk, dtype=torch.float32))
+                chunked_targets.append(torch.tensor(tgt_chunk, dtype=torch.float32))
+                chunked_masks.append(torch.tensor(mask, dtype=torch.bool))
+                # Stop if we've reached the end
+                if end >= seq_len:
+                    break
+
+        padded_inputs = torch.stack(chunked_inputs)
+        padded_targets = torch.stack(chunked_targets)
+        mask = torch.stack(chunked_masks)
+        return padded_inputs, padded_targets, mask
+
+
 
 
     def set_h_network(self, h_network):
