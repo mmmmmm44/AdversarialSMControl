@@ -4,7 +4,6 @@ It provides methods to charge, discharge, and check the battery's state of charg
 It also includes methods to calculate the energy stored in the battery and to reset its state.
 """
 
-import numpy as np
 
 class RechargeableBattery:
     
@@ -25,31 +24,66 @@ class RechargeableBattery:
         self.efficiency = efficiency  # Charging/discharging efficiency
         self.battery_soc = init_soc * capacity  # Initial state of charge
 
-    def charge(self, power, duration=1):
+
+    def charge_discharge(self, power, duration=1):
         """
-        Charges/Discharges the battery with the given power for the specified duration.
+        Charges or discharges the battery with the given power for the specified duration.
+        
+        Parameters:
+            power (float): Power in kW to charge or discharge the battery.
+            duration (float): Duration in seconds for which the battery is charged/discharged (default is 1 sec).
+        
+        Returns:
+            float: The power charged/discharged in kW, with efficiency considered.
+        """
+        energy = power * (duration / 3600)
+
+        if power >= 0:  # Charging
+            return self.charge(energy, duration)
+        else:
+            return self.discharge(energy, duration)
+
+    def charge(self, energy, duration=1):
+        """
+        Charge the battery with the given energy (kWh) for the specific duration (sec).
+
+        This returned the consumed power in kWh.
 
         Parameters:
             power (float): Power in kW to charge the battery.
             duration (float): Duration in seconds for which the battery is charged (default is 1 sec).
         """
-        energy = power * (duration / 3600)  # Convert duration from seconds to hours
-        
-        # boundary conditions for charging
-        if energy > self.max_charging_rate * (duration / 3600):
-            energy = self.max_charging_rate * (duration / 3600)
-
-        # boundary conditions for discharging
-        if energy < -self.max_discharging_rate * (duration / 3600):
-            energy = -self.max_discharging_rate * (duration / 3600)
 
         self.battery_soc += energy * self.efficiency
+
+        energy_consumed = energy
         
         if self.battery_soc > self.capacity:
             self.battery_soc = self.capacity
 
-        if self.battery_soc < 0:
-            self.battery_soc = 0
+            energy_consumed = (self.battery_soc - energy) / self.efficiency
+
+        return energy_consumed / (duration / 3600)  # Return energy in kW
+
+    def discharge(self, energy, duration=1):
+        """
+        Discharges the battery with the given energy (kWh) for the specified duration (sec).
+
+        Parameters:
+            energy (float): Energy in kWh to discharge the battery.
+            duration (float): Duration in seconds for which the battery is discharged (default is 1 sec).
+        """
+
+        new_battery_soc = self.battery_soc + energy * self.efficiency
+
+        energy_discharged = energy * self.efficiency
+
+        if new_battery_soc < 0:
+            energy_discharged = -(self.battery_soc * self.efficiency)
+
+        self.battery_soc = max(new_battery_soc, 0)
+        return energy_discharged / (duration / 3600)  # Return energy in kW
+
 
     def compute_unnormalized_charge(self, normalized_action):
         """

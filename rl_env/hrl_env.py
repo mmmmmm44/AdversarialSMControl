@@ -126,7 +126,7 @@ class SmartMeterWorld(gym.Env):
             low=-1,
             high=1,
             shape=(1,),
-            dtype=np.float32        # int or float?
+            dtype=np.float32
         )
 
         self.action_space = self.low_level_action_space
@@ -229,10 +229,16 @@ class SmartMeterWorld(gym.Env):
         self.episode.df.iat[current_step, self.episode.df.columns.get_loc('battery_soc')] = self.battery.get_state_of_charge()
 
         # Apply the action to the battery
-        self.battery.charge(power_kw, duration=duration)
+        power_charged_discharged = self.battery.charge_discharge(power_kw, duration=duration)
+
+        # --------------------
+        # after applying the action
+        # advance to the next step, but we have to calculate the grid load
+        # hence y_{t} is the aggregated user load, and we compare whether our battery action can help mask the user load y_{t+1}, given previous grid load z_{t} (an exposed information that may be acquired by attacker)
+        # --------------------
 
         # compute grid load
-        z_t = self.episode.df.iloc[current_step]['aggregate']  + power_kw * 1000   # convert kW to W
+        z_t = self.episode.df.iloc[current_step]['aggregate']  + power_charged_discharged * 1000   # convert kW to W
         z_t = np.clip(z_t, 0, None)  # ensure grid load is non-negative
         self.episode.df.iat[current_step, self.episode.df.columns.get_loc('grid_load')] = z_t  # update the grid load in the dataframe
 
@@ -242,7 +248,7 @@ class SmartMeterWorld(gym.Env):
         g_signal = self._g_signal(
             s_t_datetime=self.episode.df.iloc[current_step]['datetime'],
             s_t_plus_1_datetime=self.episode.df.iloc[current_step + 1]['datetime'],
-            power_kw=power_kw
+            power_kw=power_charged_discharged
         )
 
         f_signal = self._f_signal(
@@ -292,6 +298,10 @@ class SmartMeterWorld(gym.Env):
         """
 
         # return cost incurred for the power used in the time period
+
+        if power_kw <= 0:       # no extra cost if no power is drawn from the grid for charging
+            return 0
+
         return self._get_weighted_electricity_cost(s_t_datetime, s_t_plus_1_datetime) * power_kw
     
     def _get_weighted_electricity_cost(self, s_t_datetime: datetime, s_t_plus_1_datetime: datetime) -> float:
