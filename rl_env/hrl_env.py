@@ -201,7 +201,8 @@ class SmartMeterWorld(gym.Env):
         self.h_network_inference_buffer.clear()  # Clear the inference buffer for H-network
 
         observation = self._get_obs()
-        return observation, {}      # no info dictionary needed for now
+        info = self._get_info(observation)
+        return observation, info
     
 
     def step(self, action):
@@ -271,11 +272,34 @@ class SmartMeterWorld(gym.Env):
             # Update the current step
             self.episode.set_current_step(current_step + 1)
 
-        return self._get_obs(), reward, terminated, False, {}
+        next_obs = self._get_obs()
+        return next_obs, \
+            reward, \
+            terminated, \
+            False, \
+            self._get_info(
+                obs=next_obs, power_kw=power_kw, power_charged_discharged=power_charged_discharged, reward=reward, f_signal=f_signal, g_signal=g_signal
+            )
 
-    # TODO: optional _get_info(self) method
-    def _get_info(self):
-        pass
+    def _get_info(self, obs, power_kw=None, power_charged_discharged=None, reward=None, f_signal=None, g_signal=None):
+        """
+        Acquire additional information about the current state of the environment for debugging or logging purposes.
+
+        Returns:
+            dict: A dictionary containing additional information about the current state of the environment.
+        """
+
+        return {
+            "current_step": self.episode.get_current_step(),
+            "battery_soc (kWh)": obs["battery_soc"][0],
+            "user_load (W)": obs["aggregate_load"][0],
+            "(prev) grid_load (W)": self.episode.df.iloc[self.episode.get_current_step() - 1]['grid_load'] if self.episode.get_current_step() > 0 else None,
+            "last_action (kW)": power_kw if power_kw is not None else None,
+            "last_battery_actiuon (kW)": power_charged_discharged if power_charged_discharged is not None else None,
+            "last_reward" : reward if reward is not None else None,
+            "last_f_signal": f_signal if f_signal is not None else None,
+            "last_g_signal": g_signal if g_signal is not None else None,
+        }
 
     def _create_timestamp_features(self, timestamp: int) -> np.ndarray:
         """
@@ -305,10 +329,7 @@ class SmartMeterWorld(gym.Env):
 
         # return cost incurred for the power used in the time period
 
-        if power_kw <= 0:       # no extra cost if no power is drawn from the grid for charging
-            return 0
-
-        return self._get_weighted_electricity_cost(s_t_datetime, s_t_plus_1_datetime) * power_kw
+        return self._get_weighted_electricity_cost(s_t_datetime, s_t_plus_1_datetime) * abs(power_kw)
     
     def _get_weighted_electricity_cost(self, s_t_datetime: datetime, s_t_plus_1_datetime: datetime) -> float:
         """
