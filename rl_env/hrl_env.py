@@ -168,7 +168,7 @@ class SmartMeterWorld(gym.Env):
         """
         current_step = self.episode.get_current_step()
 
-        soc = self.battery.get_state_of_charge()
+        soc = self.battery.get_normalized_state_of_charge()
         current_load = self.episode.df.iloc[current_step]['aggregate']
         timestamp = self.episode.df.iloc[current_step]['timestamp']
         timestamp_features = self._create_timestamp_features(timestamp)
@@ -215,6 +215,9 @@ class SmartMeterWorld(gym.Env):
 
         current_step = self.episode.get_current_step()
 
+        # get user load
+        y_t = self.episode.df.iloc[current_step]['aggregate']
+
         # Get the action from the agent
         power_kw_normalized = action[0]
         power_kw = self.battery.compute_unnormalized_charge(power_kw_normalized)  # convert normalized action to kW
@@ -226,19 +229,20 @@ class SmartMeterWorld(gym.Env):
             duration = 6
         
         # before applying the action, update the battery state of charge in the dataframe
-        self.episode.df.iat[current_step, self.episode.df.columns.get_loc('battery_soc')] = self.battery.get_state_of_charge()
+        self.episode.df.iat[current_step, self.episode.df.columns.get_loc('battery_soc')] = self.battery.get_normalized_state_of_charge()
 
         # Apply the action to the battery
-        power_charged_discharged = self.battery.charge_discharge(power_kw, duration=duration)
+        power_charged_discharged = self.battery.charge_discharge(power_kw, duration, y_t)
 
         # --------------------
         # after applying the action
         # advance to the next step, but we have to calculate the grid load
-        # hence y_{t} is the aggregated user load, and we compare whether our battery action can help mask the user load y_{t+1}, given previous grid load z_{t} (an exposed information that may be acquired by attacker)
+        # hence y_{t} is the aggregated user load, and we compare whether our battery action can help mask the user load y_{t+1}, given previous (masked) grid load z_{t} (an exposed information that may be acquired by attacker)
         # --------------------
 
-        # compute grid load
-        z_t = self.episode.df.iloc[current_step]['aggregate']  + power_charged_discharged * 1000   # convert kW to W
+        # compute tentative grid load
+        z_t = y_t  + power_charged_discharged * 1000   # convert kW to W
+        
         z_t = np.clip(z_t, 0, None)  # ensure grid load is non-negative
         self.episode.df.iat[current_step, self.episode.df.columns.get_loc('grid_load')] = z_t  # update the grid load in the dataframe
 
@@ -252,7 +256,7 @@ class SmartMeterWorld(gym.Env):
         )
 
         f_signal = self._f_signal(
-            y_t=self.episode.df.iloc[current_step]['aggregate'],
+            y_t=y_t,
             z_t=z_t,
             y_t_plus_1=self.episode.df.iloc[current_step + 1]['aggregate']
         )
@@ -270,6 +274,8 @@ class SmartMeterWorld(gym.Env):
         return self._get_obs(), reward, terminated, False, {}
 
     # TODO: optional _get_info(self) method
+    def _get_info(self):
+        pass
 
     def _create_timestamp_features(self, timestamp: int) -> np.ndarray:
         """

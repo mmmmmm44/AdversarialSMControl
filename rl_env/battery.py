@@ -25,13 +25,14 @@ class RechargeableBattery:
         self.battery_soc = init_soc * capacity  # Initial state of charge
 
 
-    def charge_discharge(self, power, duration=1):
+    def charge_discharge(self, power, duration, y_t):
         """
         Charges or discharges the battery with the given power for the specified duration.
         
         Parameters:
-            power (float): Power in kW to charge or discharge the battery.
-            duration (float): Duration in seconds for which the battery is charged/discharged (default is 1 sec).
+            power (float): Power in kW to charge or dis0charge the battery.
+            duration (float): Duration in seconds for which the battery is charged/discharged.
+            y_t (float): The user load (kW) at the current step, used to determine how much the battery should discharge.
         
         Returns:
             float: The power charged/discharged in kW, with efficiency considered.
@@ -41,9 +42,9 @@ class RechargeableBattery:
         if power >= 0:  # Charging
             return self.charge(energy, duration)
         else:
-            return self.discharge(energy, duration)
+            return self.discharge(energy, duration, y_t)
 
-    def charge(self, energy, duration=1):
+    def charge(self, energy, duration):
         """
         Charge the battery with the given energy (kWh) for the specific duration (sec).
 
@@ -51,32 +52,48 @@ class RechargeableBattery:
 
         Parameters:
             power (float): Power in kW to charge the battery.
-            duration (float): Duration in seconds for which the battery is charged (default is 1 sec).
+            duration (float): Duration in seconds for which the battery is charged.
         """
 
-        self.battery_soc += energy * self.efficiency
+        energy_to_be_charged = energy * self.efficiency         # energy to be charged to battery soc
+        energy_consumed = energy                                # energy consumed from the grid
 
-        energy_consumed = energy
+        if self.battery_soc >= self.capacity:
+            # Battery is already full, no energy can be charged
+            energy_consumed = 0
+            return energy_consumed / (duration / 3600)
+
         
-        if self.battery_soc > self.capacity:
+        if self.battery_soc + energy_consumed > self.capacity:
+            energy_to_be_charged = self.capacity - self.battery_soc  # Only charge up to capacity
+            energy_consumed = energy_to_be_charged / self.efficiency
+            
             self.battery_soc = self.capacity
-
-            energy_consumed = (self.battery_soc - energy) / self.efficiency
+        else:
+            self.battery_soc += energy_to_be_charged
 
         return energy_consumed / (duration / 3600)  # Return energy in kW
 
-    def discharge(self, energy, duration=1):
+    def discharge(self, energy, duration, y_t):
         """
         Discharges the battery with the given energy (kWh) for the specified duration (sec).
 
         Parameters:
             energy (float): Energy in kWh to discharge the battery.
-            duration (float): Duration in seconds for which the battery is discharged (default is 1 sec).
+            duration (float): Duration in seconds for which the battery is discharged.
+            y_t (float): The user load at the current step, used to determine how much the battery should discharge.
         """
 
-        new_battery_soc = self.battery_soc + energy * self.efficiency
+        requested_energy_draw = -y_t * (duration / 3600) / 1000        # kWh
 
-        energy_discharged = energy * self.efficiency
+        energy_draw_from_battery = energy                       # energy to be deduced from battery soc
+        energy_discharged = energy * self.efficiency            # energy discharged to support user load
+
+        if abs(energy_discharged) > abs(requested_energy_draw):
+            energy_discharged = requested_energy_draw
+            energy_draw_from_battery = requested_energy_draw / self.efficiency
+        
+        new_battery_soc = self.battery_soc + energy_draw_from_battery
 
         if new_battery_soc < 0:
             energy_discharged = -(self.battery_soc * self.efficiency)
@@ -105,7 +122,7 @@ class RechargeableBattery:
 
         return unnormalized_charge
 
-    def get_state_of_charge(self):
+    def get_normalized_state_of_charge(self):
         """
         Returns the normalized [0, 1] current state of charge (SoC) of the battery.
         """
