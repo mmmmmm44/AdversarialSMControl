@@ -13,6 +13,7 @@ from torch.utils.data import DataLoader, TensorDataset
 from render_window import RenderWindowControl, RenderWindowMessageType
 from env_data_loader import SmartMeterDataLoader
 from battery import RechargeableBattery
+from model.H_network.h_network_arch import HNetworkType
 from utils import print_log
 
 class SmartMeterEpisode:
@@ -84,7 +85,7 @@ class SmartMeterWorld(gym.Env):
 
     metadata = {"render_modes": ["human"]}
 
-    def __init__(self, smart_meter_data_loader: SmartMeterDataLoader, rb_config: Optional[dict] = None, render_mode=None, render_host='127.0.0.1', render_port=50007):
+    def __init__(self, smart_meter_data_loader: SmartMeterDataLoader, h_model_type: HNetworkType, rb_config: Optional[dict] = None, render_mode=None, render_host='127.0.0.1', render_port=50007):
         super(SmartMeterWorld, self).__init__()
 
         # TCP client for real-time rendering
@@ -131,8 +132,9 @@ class SmartMeterWorld(gym.Env):
 
         self.action_space = self.low_level_action_space
 
-        self.reward_lambda = 0.1        # value between [0,1]. Closer to zero -> more privacy focused
+        self.reward_lambda = 0.5        # value between [0,1]. Closer to zero -> more privacy focused
 
+        self.h_network_type = h_model_type
         self.h_network = None  # Placeholder for H-network, to be loaded or trained
         self.h_network_stdscaler = None  # Placeholder for H-network standard scaler, to be loaded or trained
         self.h_network_criterion = torch.nn.GaussianNLLLoss(reduction='none')  # loss function as the privacy signal. Using sum mode
@@ -432,10 +434,22 @@ class SmartMeterWorld(gym.Env):
 
         # Get the H-network reward
         with torch.no_grad():
-            for batch in dataloader:
+
+            lstm_1_h, lstm_2_h = None, None
+
+            for i, batch in enumerate(dataloader):
                 _input, _target, _mask = batch
 
-                mean = self.h_network(_input)
+                if self.h_network_type == HNetworkType.H_NETWORK:
+                    # H-Network that predicts only the mean
+                    mean, lstm_1_h, lstm_2_h = self.h_network(_input, lstm_1_h, lstm_2_h)
+                elif self.h_network_type == HNetworkType.H_NETWORK2:
+                    # H-Network that predicts both mean and log variance
+                    mean, log_var, lstm_1_h, lstm_2_h = self.h_network(_input, lstm_1_h, lstm_2_h)
+
+                if i != len(dataloader) - 1:
+                    # If not the last batch, we do not compute the loss yet
+                    continue
 
                 # Apply the mask to the mean and target
                 mean = mean.view(-1)  # flatten the mean
@@ -445,15 +459,22 @@ class SmartMeterWorld(gym.Env):
                 mean_masked = torch.masked_select(mean, _mask)  # apply the mask to the mean
                 _target_masked = torch.masked_select(_target, _mask)  # apply the mask to the target
 
-                loss = self.h_network_criterion(mean_masked, _target_masked, var=torch.ones_like(mean_masked))  # assuming unit variance
+                if self.h_network_type == HNetworkType.H_NETWORK:
+                    loss = self.h_network_criterion(mean_masked, _target_masked, var=torch.ones_like(mean_masked))  # assuming unit variance
+
+                elif self.h_network_type == HNetworkType.H_NETWORK2:
+                    # For H-Network2, we need to compute the variance from log variance
+                    log_var_masked = torch.masked_select(log_var.view(-1), _mask)                                     # apply the mask to the log variance
+                    loss = self.h_network_criterion(mean_masked, _target_masked, var=torch.exp(log_var_masked))    # compute the loss with the masked mean and target
 
                 # compute likelihood of each sample
                 likelihood = torch.exp(-loss)
 
                 # signal output is expected value of the negative loss
-                signal_output = torch.sum(torch.mul(likelihood, -loss)) if signal_output is None else signal_output + torch.sum(torch.mul(likelihood, -loss))
+                signal_output = torch.mul(likelihood, -loss)
 
-        # return the loss. This approximates \mathbb{E} \log(p(y_t_plus_1 | z_t, y_t)) -> approximates the Mutual Information (MI)
+        # return the loss. This approximates \mathbb{E} \log(p(y_t_plus_1 | z_t, y_t)) -> the sum of signals approximates the Mutual Information (MI)
+        signal_output = signal_output[-1]        # only consider the last sample.
         return signal_output.item()
     
     def _chunk_pad_mask_sequences(self, input_sequences, target_sequences, chunk_size=512, stride=64, padding_value=0.0):
