@@ -16,6 +16,8 @@ from battery import RechargeableBattery
 from model.H_network.h_network_arch import HNetworkType
 from utils import print_log
 
+from sklearn.preprocessing import StandardScaler
+
 class SmartMeterEpisode:
     """
     Represents a single episode in the Smart Meter World environment.
@@ -28,15 +30,23 @@ class SmartMeterEpisode:
 
         self.current_step = 0  # Current step in the episode
 
-    def reset(self, selected_aggregate_load_df: pd.DataFrame):
+    def reset(self, selected_aggregate_load_df: pd.DataFrame, stdscalar: StandardScaler):
         """
         Reset the episode with a new aggregate load DataFrame.
         Args:
             selected_aggregate_load_df (pd.DataFrame): The DataFrame containing aggregate load data for the episode.
         """
+
+        if stdscalar is None:
+            raise ValueError("StandardScaler is not provided. Please provide a trained StandardScaler instance to standardize the aggregate load.")
+
         self.df = selected_aggregate_load_df.copy()
         self.df['grid_load'] = None
         self.df['battery_soc'] = None
+
+        # standardize the aggregate load
+        self.df['aggregate_std'] = stdscalar.transform(self.df[['aggregate']].values).flatten()
+
         self.current_step = 0
 
     def get_current_step(self) -> int:
@@ -112,7 +122,8 @@ class SmartMeterWorld(gym.Env):
 
         # define state space and action space
         self.observation_space = gym.spaces.Dict({
-            "aggregate_load": gym.spaces.Box(low=0, high=5000, shape=(1,), dtype=np.float32),    # TODO: look back to the range of the aggregated load
+            # "aggregate_load": gym.spaces.Box(low=0, high=5000, shape=(1,), dtype=np.float32),    # the understandardized aggregate load in W
+            "aggregate_load": gym.spaces.Box(low=-4, high=4, shape=(1,), dtype=np.float32),    # standardized aggregate load
             "battery_soc": gym.spaces.Box(low=0, high=1, shape=(1,), dtype=np.float32),
             "timestamp_features": gym.spaces.Box(low=-0.5, high=0.5, shape=(3,), dtype=np.float32)  # Hour, Day of Week, Month
         })
@@ -171,7 +182,7 @@ class SmartMeterWorld(gym.Env):
         current_step = self.episode.get_current_step()
 
         soc = self.battery.get_normalized_state_of_charge()
-        current_load = self.episode.df.iloc[current_step]['aggregate']
+        current_load = self.episode.df.iloc[current_step]['aggregate_std']      # receive standardized aggregate load may be better?
         timestamp = self.episode.df.iloc[current_step]['timestamp']
         timestamp_features = self._create_timestamp_features(timestamp)
 
@@ -196,7 +207,7 @@ class SmartMeterWorld(gym.Env):
 
         # randomly select an aggregate load DataFrame from the list
         selected_idx = self.np_random.integers(0, self.smart_meter_data_loader.get_divided_segments_length())
-        self.episode.reset(self.smart_meter_data_loader.get_aggregate_load_segment(selected_idx))  # Reset with a new episode
+        self.episode.reset(self.smart_meter_data_loader.get_aggregate_load_segment(selected_idx), self.h_network_stdscaler)  # Reset with a new episode
 
         print_log(f"[SmartMeterWorld] Resetting environment with a new episode. Episode info: {self.episode.get_episode_info()}")
 
