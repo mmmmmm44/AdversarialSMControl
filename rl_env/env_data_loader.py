@@ -33,7 +33,7 @@ class SmartMeterDataLoader:
             for j in pd.date_range(start=start_time, end=end_time, freq=self.segment_length):
                 divided_segments.append([
                     j.to_pydatetime(), 
-                    min(j + self.segment_length - timedelta(microseconds=1), end_time).to_pydatetime()
+                    min(j + self.segment_length - timedelta(microseconds=1), end_time)
                 ])
 
         return np.array(divided_segments)
