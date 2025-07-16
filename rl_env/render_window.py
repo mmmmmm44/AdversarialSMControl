@@ -21,6 +21,8 @@ from utils import print_log
 class RenderWindowControl(Enum):
     RESET = 0       # reset the window & buffers
     SAVE_GRAPH = 1  # save the current graph
+    RECEIVE_ENV_INFO = 2  # receive environment info from the RL module
+
     CLOSE = 98      # close the connection. Open for new connection
     TERMINATE = 99  # terminate the server and close the window
 
@@ -39,6 +41,9 @@ class RenderWindow(QWidget):
         # Create a matplotlib figure and canvas
         self.figure = Figure(figsize=(10, 10), dpi=150)
         self.canvas = FigureCanvasQTAgg(self.figure)
+        self.suptitle_suffix = "Real-time Load and Battery SOC Monitoring"
+        self.suptitle_text = self.suptitle_suffix
+        self.env_info = {}      # to be set by the environment after making an initial connection
 
         # Add the canvas to the layout
         layout.addWidget(self.canvas)
@@ -106,6 +111,9 @@ class RenderWindow(QWidget):
         """Plot the latest data in the deques."""
         
         self.figure.clf()
+
+        st = self.figure.suptitle(self.suptitle_text, fontsize=14)
+
         ax1 = self.figure.add_subplot(2, 1, 1)
         ax2 = self.figure.add_subplot(2, 1, 2)
         # Convert to numpy arrays for plotting
@@ -130,6 +138,11 @@ class RenderWindow(QWidget):
             ax2.legend()
             ax2.set_ylim(0, 1.1)
             self.figure.tight_layout()
+
+            # shift subplots down:
+            st.set_y(0.95)
+            self.figure.subplots_adjust(top=0.85)
+
         except Exception as e:
             print(f"[RenderWindow] Plotting error: {e}")
         self.canvas.draw()
@@ -142,17 +155,26 @@ class RenderWindow(QWidget):
         print_log("[RenderWindow] Buffers reset.")
         self.set_status("Buffers are reset")
 
-    def save_graph(self, path):
+    def save_graph(self, kwargs):
         try:
             curr_graph = deepcopy(self.figure)      # deepcopy to keep the current graph, as it will be re-drawn regularly
-            curr_graph.savefig(path)
-            print_log(f"[RenderWindow] Graph saved to {path}")
-            self.set_status(f"Graph is saved to {path}")
+            curr_graph.savefig(**kwargs)
+            print_log(f"[RenderWindow] Graph saved to {kwargs.get('fname')}")
+            self.set_status(f"Graph is saved to {kwargs.get('fname')}")
 
             del curr_graph  # Free memory
         except Exception as e:
             print_log(f"[RenderWindow] Failed to save graph: {e}")
             self.set_status(f"Failed to save graph: {e}")
+
+    def receive_env_info(self, env_info):
+        """Receive environment info from the RL module and update the suptitle."""
+        self.env_info = env_info
+        if 'selected_idx' in env_info:
+            self.suptitle_text = f"{self.suptitle_suffix} - index: {env_info['selected_idx']}"
+        else:
+            self.suptitle_text = self.suptitle_suffix
+        print_log(f"[RenderWindow] Environment info received: {env_info}")
 
 
 # TCP server to receive matplotlib figures and update the GUI
@@ -212,9 +234,15 @@ class RenderServer:
                         if cmd == RenderWindowControl.RESET.name and self.window:
                             self.window.reset_buffers()
                         elif cmd == RenderWindowControl.SAVE_GRAPH.name and self.window:
-                            path = payload.get('path')
-                            if path:
-                                self.window.save_graph(path)
+                            fname = payload.get('fname')      # check whether a path is provided, only save if there is a path
+                            if fname:
+                                self.window.save_graph(payload)
+
+                        elif cmd == RenderWindowControl.RECEIVE_ENV_INFO.name and self.window:
+                            env_info = payload.get('env_info', {})
+                            if env_info:
+                                self.window.receive_env_info(env_info)
+
                         elif cmd == RenderWindowControl.CLOSE.name:
                             print_log("[RenderServer] CLOSE command received. Closing connection.")
                             if self.window:

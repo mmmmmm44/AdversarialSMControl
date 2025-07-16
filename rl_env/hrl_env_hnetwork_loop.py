@@ -37,7 +37,8 @@ class SmartMeterWorld(gym.Env):
             raise ValueError("No SmartMeterDataLoader provided.")
 
         # initialize an episode
-        self.episode = SmartMeterEpisode(self.smart_meter_data_loader.get_aggregate_load_segment(0))  # start with the first DataFrame
+        self.selected_idx = 0
+        self.episode = SmartMeterEpisode(self.smart_meter_data_loader.get_aggregate_load_segment(self.selected_idx))  # start with the first DataFrame
 
         # Initialize battery state
         self.battery = RechargeableBattery(**rb_config) if rb_config else RechargeableBattery(
@@ -133,10 +134,12 @@ class SmartMeterWorld(gym.Env):
         self.battery.reset(0)    # Reset the battery state of charge to zero *i.e. empty battery*
 
         # randomly select an aggregate load DataFrame from the list
-        selected_idx = self.np_random.integers(0, self.smart_meter_data_loader.get_divided_segments_length())
-        self.episode = SmartMeterEpisode(self.smart_meter_data_loader.get_aggregate_load_segment(selected_idx))  # Reset with a new episode
+        self.selected_idx = int(self.np_random.integers(0, self.smart_meter_data_loader.get_divided_segments_length()))
+        self.episode = SmartMeterEpisode(self.smart_meter_data_loader.get_aggregate_load_segment(self.selected_idx))  # Reset with a new episode
 
         print_log(f"[SmartMeterWorld] Resetting environment with a new episode. Episode info: {self.episode.get_episode_info()}")
+
+        self.send_env_info()  # send the environment info to the render window
 
         observation = self._get_obs()
         info = self._get_info(observation)
@@ -400,13 +403,24 @@ class SmartMeterWorld(gym.Env):
             message['payload'] = payload
         self._send_json_message(message)
 
-    def save_graph(self, path:str):
-        """Request the render window to save the current graph to the given path."""
-        self._send_control_message(RenderWindowControl.SAVE_GRAPH.name, {'path': path})
+    def save_graph(self, kwargs):
+        """Request the render window to save the current graph to the given path.
+        
+        Args:
+            kwargs: Keyword arguments to pass to the render window's save_graph method, which are valid arguments for plt.savefig().
+        """
+        self._send_control_message(RenderWindowControl.SAVE_GRAPH.name, kwargs)
 
     def reset_render_window(self):
         """Request the render window to reset (clear) all buffers."""
         self._send_control_message(RenderWindowControl.RESET.name)
+
+    def send_env_info(self):
+        """Send environment information to the render window."""
+        env_info = {
+            'selected_idx': self.selected_idx,
+        }
+        self._send_control_message(RenderWindowControl.RECEIVE_ENV_INFO.name, {'env_info': env_info})
 
     def close(self):
         """
