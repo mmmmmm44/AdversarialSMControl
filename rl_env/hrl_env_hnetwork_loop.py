@@ -1,11 +1,13 @@
-from typing import Optional
 import numpy as np
 import gymnasium as gym
 import pandas as pd
+
 from datetime import datetime, timedelta, timezone, time
+from typing import Optional
 from collections import deque
 import struct
 import json
+from pathlib import Path
 
 from render_window import RenderWindowControl, RenderWindowMessageType
 from env_data_loader import SmartMeterDataLoader
@@ -73,17 +75,20 @@ class SmartMeterWorld(gym.Env):
 
         self.reward_lambda = 0.5        # value between [0,1]. Closer to zero -> more privacy focused
 
+        # H-network stuffs
         self.h_network_rl_module = h_network_rl_module
         if not self.h_network_rl_module:
             raise ValueError("No HNetworkRLModule provided.")    
         self.h_network_episode_inference_buffer = deque()
 
+        # reward logging stuffs
+        self.episodes_rewards = []  # to store the sum of rewards, mean of rewards, and std. of rewards
+        self.per_episode_rewards = []  # to store the rewards of the current episode
 
         # render stuffs
         assert render_mode is None or render_mode in self.metadata["render_modes"]
         self.render_mode = render_mode
         if self.render_mode == "human":
-            # plt.ion()  # Enable interactive mode for matplotlib
             # Try to connect to the render server
             self._init_render_client()
 
@@ -132,6 +137,9 @@ class SmartMeterWorld(gym.Env):
         self.h_network_episode_inference_buffer.clear()
 
         self.battery.reset(0)    # Reset the battery state of charge to zero *i.e. empty battery*
+
+        # reset the episodes rewards
+        self.per_episode_rewards = []
 
         # randomly select an aggregate load DataFrame from the list
         self.selected_idx = int(self.np_random.integers(0, self.smart_meter_data_loader.get_divided_segments_length()))
@@ -204,6 +212,7 @@ class SmartMeterWorld(gym.Env):
 
         # reward function is the negative of loss signal
         reward = - (self.reward_lambda * g_signal + (1 - self.reward_lambda) * f_signal)
+        self.per_episode_rewards.append(reward)  # logging use; append the reward to the current episode rewards
 
         # determine termination condition
         terminated = current_step >= self.episode.get_episode_length() - 1 - 1      # -1 because we want to stop before the last step to avoid index out of range
@@ -214,6 +223,18 @@ class SmartMeterWorld(gym.Env):
         else:
             # push the old episode to the HNetworkRLModule buffer
             self.h_network_rl_module.push_to_replay_buffer(self.episode)
+
+            # calculate the sum of rewards for the episode
+            episode_sum = sum(self.per_episode_rewards)
+            episode_reward_stats = {
+                "sum": float(episode_sum),
+                "mean": float(np.mean(self.per_episode_rewards)),
+                "std": float(np.std(self.per_episode_rewards))
+            }
+            self.episodes_rewards.append(episode_reward_stats)
+            self.per_episode_rewards = []  # reset the per-episode rewards for the next episode
+
+            print_log(f"[SmartMeterWorld] Episode finished. Sum of rewards: {episode_sum}. Mean of rewards: {episode_reward_stats['mean']}. Std of rewards: {episode_reward_stats['std']}")
 
         next_obs = self._get_obs()
         return next_obs, \
@@ -348,6 +369,19 @@ class SmartMeterWorld(gym.Env):
         f_signal = self.h_network_rl_module.compute_f_signal(h_network_input, h_network_target)
         return f_signal
 
+    def save_episodes_rewards(self, folder_path: Path):
+        """
+        Save the episodes rewards to a file.
+        Args:
+            folder_path (Path): The path to save the episodes rewards in JSON format.
+        """
+        if not folder_path.exists():
+            folder_path.mkdir(parents=True)
+        
+        file_path = folder_path / "episodes_rewards.json"
+        with open(file_path, "w") as f:
+            json.dump(self.episodes_rewards, f, indent=4)
+        print_log(f"[SmartMeterWorld] Episodes rewards saved to {file_path}")
 
     def render(self):
         """

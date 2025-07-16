@@ -1,6 +1,7 @@
 # The module which will be integrated into the RL training loop to realize loop-training of H-network, along with the RL agent.
 
 from collections import deque
+from pathlib import Path
 
 from torch.utils.data import DataLoader, TensorDataset
 import torch.nn as nn
@@ -16,7 +17,7 @@ from h_network2 import HNetwork as HNetwork2
 class HNetworkRLModule:
     """
     A module to handle the H-network training and inference in the context of reinforcement learning.
-    This module is designed to be integrated into a reinforcement learning training loop.
+    This module is designed to be integrated into the RL training loop.
     """
 
     def __init__(self, h_network_type: HNetworkType, device):
@@ -26,14 +27,16 @@ class HNetworkRLModule:
         self.h_network = None                   # Placeholder for H-network, to be loaded or trained
         self.H_NETWORK_MAXSEQLEN = 512          # Maximum sequence length for H-network inference buffer
         
-
-
         self.replay_buffer = deque()  # Replay buffer for H-network training, stores SmartMeterEpisode objects
 
         # RL environment related variables
         # self.h_network_stdscaler = h_network_stdscaler  # Placeholder for H-network standard scaler, to be loaded or trained
         self.h_network_criterion = nn.GaussianNLLLoss(reduction='none')  # loss function as the privacy signal.
         # self.h_network_inference_buffer = deque()  # Buffer for H-network inference, to store recent pair of input (z_t, y_t) and desired target (y_{t+1})
+
+        # logging results
+        # we log the mean and std of the training loss for each training step
+        self.train_loss_list = []
 
 
     def initialize_h_network(self):
@@ -60,13 +63,13 @@ class HNetworkRLModule:
         self.h_network_training_criterion = nn.GaussianNLLLoss()
         self.h_network_training_optimizer = torch.optim.Adam(self.h_network.parameters(), lr=1e-3)
 
-        self.train_loss_list = []
+        self.train_loss_list = []  # Reset the training loss list
 
         self.h_network.to(self.device)  # Move the H-network to the specified device
         
     def set_h_network(self, h_network):
         """
-        Set the H-network to be used in the RL training loop.
+        Set the H-network to be used in the RL training/inferencing loop.
         """
         self.h_network = h_network
 
@@ -139,18 +142,17 @@ class HNetworkRLModule:
             if self.device == 'cuda':
                 loss = loss.cpu()
 
-            avg_loss += loss.item()
             loss_list.append(loss.item())  # Store loss for this batch
 
-        avg_loss /= len(dataloader)
-        self.train_loss_list.append(avg_loss)
+        avg_loss = np.mean(loss_list)           # Calculate average loss over all batches
+        std_loss = np.std(loss_list)             # Calculate standard deviation of loss over all batches
+        self.train_loss_list.append((avg_loss, std_loss))       # Append the average and std loss to the training loss list
         # print_log(f"Training H-network completed. Total batches: {len(dataloader)}; Average training loss: {avg_loss:.10f}")
         # print()
 
         # after training, reset the replay buffer
         self.replay_buffer.clear()
 
-        return avg_loss, loss_list
     
 
     def compute_f_signal(self, h_network_input, h_network_target):
@@ -309,3 +311,34 @@ class HNetworkRLModule:
             episode (SmartMeterEpisode): The completed episode to push.
         """
         self.replay_buffer.append(episode)
+
+    def save_train_loss_list(self, file_path: Path):
+        """
+        Save the training loss list to a file.
+        Args:
+            file_path (Path): The path to save the training loss list.
+        """
+        np.save(file_path, np.array(self.train_loss_list))
+
+    def save_h_network(self, file_path: Path):
+        """
+        Save the H-network to a file.
+        Args:
+            file_path (Path): The path to save the H-network.
+        """
+        if self.h_network is None:
+            raise ValueError("H-network is not set. Please set the H-network before saving.")
+        
+        torch.save(self.h_network.state_dict(), file_path)
+
+    def load_h_network(self, file_path: Path):
+        """
+        Load the H-network from a file.
+        Args:
+            file_path (Path): The path to load the H-network from.
+        """
+        if self.h_network is None:
+            self.h_network = self.initialize_h_network()
+        
+        self.h_network.load_state_dict(torch.load(file_path, map_location=self.device))
+        self.h_network.to(self.device)
