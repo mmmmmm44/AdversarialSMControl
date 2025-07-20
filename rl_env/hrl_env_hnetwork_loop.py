@@ -25,7 +25,7 @@ class SmartMeterWorld(gym.Env):
 
     metadata = {"render_modes": ["human"]}
 
-    def __init__(self, smart_meter_data_loader: SmartMeterDataLoader, h_network_rl_module: HNetworkRLModule, rb_config: Optional[dict] = None, render_mode=None, render_host='127.0.0.1', render_port=50007):
+    def __init__(self, smart_meter_data_loader: SmartMeterDataLoader, h_network_rl_module: HNetworkRLModule, log_folder: Path, rb_config: Optional[dict] = None, render_mode=None, render_host='127.0.0.1', render_port=50007):
         super(SmartMeterWorld, self).__init__()
 
         # TCP client for real-time rendering
@@ -41,14 +41,17 @@ class SmartMeterWorld(gym.Env):
         # initialize an episode
         self.selected_idx = 0
         self.episode = SmartMeterEpisode(self.smart_meter_data_loader.get_aggregate_load_segment(self.selected_idx))  # start with the first DataFrame
+        self.episode_info_list = []
 
         # Initialize battery state
+        # init_soc is the constant initial state of charge (SoC) of the battery for each episode beginning
+        self.init_soc = 0.15 if rb_config is None else rb_config.get('init_soc', 0.5)  # default to 50% if not specified
         self.battery = RechargeableBattery(**rb_config) if rb_config else RechargeableBattery(
                 capacity=8.0,  # kWh
                 max_charging_rate=4.0,  # kW
                 max_discharging_rate=4.0,  # kW
                 efficiency=1.0,  # 100% efficiency
-                init_soc=0.5  # 50% initial state of charge
+                init_soc=self.init_soc  # 50% initial state of charge
         )
 
         # define state space and action space
@@ -82,6 +85,7 @@ class SmartMeterWorld(gym.Env):
         self.h_network_episode_inference_buffer = deque()
 
         # reward logging stuffs
+        self.log_folder = log_folder
         self.episodes_rewards = []  # to store the sum of rewards, mean of rewards, and std. of rewards
         self.per_episode_rewards = []  # to store the rewards of the current episode
 
@@ -123,10 +127,11 @@ class SmartMeterWorld(gym.Env):
             "timestamp_features": timestamp_features
         }
     
-    def reset(self, seed: Optional[int] = None, options: Optional[dict] = None):
+    def reset(self, episode_idx: int = None, seed: Optional[int] = None, options: Optional[dict] = None):
         """
         Reset the environment to the initial state.
         Args:
+            episode_idx (int): The index of the episode to reset (begin) with.
             seed (Optional[int]): Random seed for reproducibility.
             options (Optional[dict]): Additional options for resetting the environment.
         Returns:
@@ -136,14 +141,21 @@ class SmartMeterWorld(gym.Env):
 
         self.h_network_episode_inference_buffer.clear()
 
-        self.battery.reset(0)    # Reset the battery state of charge to zero *i.e. empty battery*
+        self.battery.reset(self.init_soc)    # Reset the battery state of charge to initial value
 
         # reset the episodes rewards
         self.per_episode_rewards = []
 
+        # select an episode to reset with
+        # if episode_idx is None, randomly select an episode from the available episodes
+        # if episode_idx is provided, check if it is valid and use it; otherwise,
         # randomly select an aggregate load DataFrame from the list
-        self.selected_idx = int(self.np_random.integers(0, self.smart_meter_data_loader.get_divided_segments_length()))
+        if episode_idx is not None and (episode_idx < 0 or episode_idx >= self.smart_meter_data_loader.get_divided_segments_length()):
+            raise ValueError(f"Invalid episode index: {episode_idx}. Must be between 0 and {self.smart_meter_data_loader.get_divided_segments_length() - 1}.")
+
+        self.selected_idx = episode_idx if episode_idx is not None else int(self.np_random.integers(0, self.smart_meter_data_loader.get_divided_segments_length()))
         self.episode = SmartMeterEpisode(self.smart_meter_data_loader.get_aggregate_load_segment(self.selected_idx))  # Reset with a new episode
+        self.episode_info_list = []
 
         print_log(f"[SmartMeterWorld] Resetting environment with a new episode. Episode info: {self.episode.get_episode_info()}")
 
@@ -151,6 +163,9 @@ class SmartMeterWorld(gym.Env):
 
         observation = self._get_obs()
         info = self._get_info(observation)
+
+        self.episode_info_list.append(info)         # store the initial observation info
+
         return observation, info
     
 
@@ -204,7 +219,7 @@ class SmartMeterWorld(gym.Env):
             power_kw=power_charged_discharged
         )
 
-        f_signal = self._f_signal(
+        f_signal, f_signal_additional_info = self._f_signal(
             y_t=y_t,
             z_t=z_t,
             y_t_plus_1=self.episode.df.iloc[current_step + 1]['aggregate']
@@ -220,7 +235,15 @@ class SmartMeterWorld(gym.Env):
         if not terminated:
             # Update the current step
             self.episode.set_current_step(current_step + 1)
-        else:
+        
+        next_obs = self._get_obs()
+        next_info = self._get_info(
+            obs=next_obs, power_kw=power_kw, power_charged_discharged=power_charged_discharged, reward=reward, f_signal=f_signal, g_signal=g_signal, f_signal_additional_info=f_signal_additional_info
+        )
+        self.episode_info_list.append(next_info)
+
+        # log the episode when terminated
+        if terminated:
             # push the old episode to the HNetworkRLModule buffer
             self.h_network_rl_module.push_to_replay_buffer(self.episode)
 
@@ -234,18 +257,17 @@ class SmartMeterWorld(gym.Env):
             self.episodes_rewards.append(episode_reward_stats)
             self.per_episode_rewards = []  # reset the per-episode rewards for the next episode
 
+            self._save_episode_info_list(self.log_folder, len(self.episodes_rewards))
+
             print_log(f"[SmartMeterWorld] Episode finished. Sum of rewards: {episode_sum}. Mean of rewards: {episode_reward_stats['mean']}. Std of rewards: {episode_reward_stats['std']}")
 
-        next_obs = self._get_obs()
         return next_obs, \
             reward, \
             terminated, \
             False, \
-            self._get_info(
-                obs=next_obs, power_kw=power_kw, power_charged_discharged=power_charged_discharged, reward=reward, f_signal=f_signal, g_signal=g_signal
-            )
+            next_info
 
-    def _get_info(self, obs, power_kw=None, power_charged_discharged=None, reward=None, f_signal=None, g_signal=None):
+    def _get_info(self, obs, power_kw=None, power_charged_discharged=None, reward=None, f_signal=None, g_signal=None, f_signal_additional_info=None):
         """
         Acquire additional information about the current state of the environment for debugging or logging purposes.
 
@@ -253,16 +275,34 @@ class SmartMeterWorld(gym.Env):
             dict: A dictionary containing additional information about the current state of the environment.
         """
 
+        # type casting is necessary to ensure the values are JSON serializable
+
+        info_dict = {
+            "episode_index": int(self.selected_idx),
+            "current_step": int(self.episode.get_current_step()),
+            'datetime': self.episode.df.iloc[self.episode.get_current_step()]['datetime'].isoformat(timespec='seconds') if self.episode.get_current_step() < len(self.episode.df) else None,
+            "battery_soc (%)": float(obs["battery_soc"][0]),
+            "battery_soc (kWh)": float(obs["battery_soc"][0]) * self.battery.capacity,  # convert normalized SoC to kWh
+            "user_load (W)": float(self.episode.df.iloc[self.episode.get_current_step()]['aggregate']) if self.episode.get_current_step() > 0 else None,
+            "grid_load (W)": float(self.episode.df.iloc[self.episode.get_current_step() - 1]['grid_load']) if self.episode.get_current_step() > 0 else None,
+            "action (kW)": float(power_kw) if power_kw is not None else None,
+            "battery_action (kW)": float(power_charged_discharged) if power_charged_discharged is not None else None,
+            "reward" : float(reward) if reward is not None else None,
+            "f_signal": float(f_signal) if f_signal is not None else None,
+            "g_signal": float(g_signal) if g_signal is not None else None,
+        }
+        info_dict.update({"f_signal" + "-" + k : float(v) for k, v in f_signal_additional_info.items()} if f_signal_additional_info is not None else {})
+
+        return info_dict
+    
+    def get_env_info(self):
+        """
+        Get information about the general setting of the environment.
+        Returns:
+            dict: A dictionary containing environment information such as selected episode index and current step.
+        """
         return {
-            "current_step": self.episode.get_current_step(),
-            "battery_soc (kWh)": obs["battery_soc"][0],
-            "user_load (W)": obs["aggregate_load"][0],
-            "(prev) grid_load (W)": self.episode.df.iloc[self.episode.get_current_step() - 1]['grid_load'] if self.episode.get_current_step() > 0 else None,
-            "last_action (kW)": power_kw if power_kw is not None else None,
-            "last_battery_actiuon (kW)": power_charged_discharged if power_charged_discharged is not None else None,
-            "last_reward" : reward if reward is not None else None,
-            "last_f_signal": f_signal if f_signal is not None else None,
-            "last_g_signal": g_signal if g_signal is not None else None,
+            "reward_lambda": self.reward_lambda,
         }
 
     def _create_timestamp_features(self, timestamp: int) -> np.ndarray:
@@ -339,6 +379,7 @@ class SmartMeterWorld(gym.Env):
             y_t_plus_1 (float): User's load at time t+1.
         Returns:
             float: Calculated H-network reward.
+            dict: Additional information about the last predictions.
         """
         
         if self.h_network_rl_module is None:
@@ -366,8 +407,27 @@ class SmartMeterWorld(gym.Env):
 
 
         # call HNetworkRLModule.compute_f_signal to compute the f_signal and return it.
-        f_signal = self.h_network_rl_module.compute_f_signal(h_network_input, h_network_target)
-        return f_signal
+        f_signal, additional_info = self.h_network_rl_module.compute_f_signal(h_network_input, h_network_target)
+        return f_signal, additional_info
+    
+    def _save_episode_info_list(self, log_folder:Path, episode_idx:int):
+        """
+        Save the infos of the whole episode to a json file
+        Args:
+            log_folder (Path): The folder to save the episode info.
+            episode_idx (int): The index of the episode to save.
+        """
+        target_folder = log_folder / "episode_info"
+
+        if not target_folder.exists():
+            target_folder.mkdir(parents=True)
+
+        episode_info_list_path = target_folder / f"episode_{episode_idx:0>4}_info.json"
+
+        with open(episode_info_list_path, "w") as f:
+            json.dump(self.episode_info_list, f, indent=4)
+
+        print_log(f"Episode {episode_idx:0>4} info saved to {episode_info_list_path}")
 
     def save_episodes_rewards(self, folder_path: Path):
         """
@@ -382,6 +442,35 @@ class SmartMeterWorld(gym.Env):
         with open(file_path, "w") as f:
             json.dump(self.episodes_rewards, f, indent=4)
         print_log(f"[SmartMeterWorld] Episodes rewards saved to {file_path}")
+
+    def _create_env_config(self):
+        """
+        Create the environment configuration dictionary.
+        Returns:
+            dict: Environment configuration including battery settings, reward lambda, and H-network module settings.
+        """
+        env_config = {
+            "battery": self.battery.get_battery_config(),
+            "reward_lambda": self.reward_lambda,
+            "h_network_type": str(self.h_network_rl_module.h_network_type),
+            "init_soc": self.init_soc,
+        }
+        return env_config
+
+    def save_env_config(self, log_folder: Path):
+        """
+        Save the environment configuration to a file.
+        Args:
+            experiment_folder (Path): The folder to save the environment config.
+        """
+        if not log_folder.exists():
+            log_folder.mkdir(parents=True)
+
+        env_config_path = log_folder / "env_config.json"
+        with open(env_config_path, "w") as f:
+            json.dump(self._create_env_config(), f, indent=4)
+
+        print_log(f"[SmartMeterWorld] Environment config saved to {env_config_path}")
 
     def render(self):
         """

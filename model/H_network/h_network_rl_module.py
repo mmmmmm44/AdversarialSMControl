@@ -2,6 +2,7 @@
 
 from collections import deque
 from pathlib import Path
+import json
 
 from torch.utils.data import DataLoader, TensorDataset
 import torch.nn as nn
@@ -86,9 +87,6 @@ class HNetworkRLModule:
         # replay_buffer stores SmartMeterEpisode objects
         # for each episode, we apply standardization to the grid load.
         for episode in self.replay_buffer:
-            # check whether the episode has non-zero grid load ?
-            
-
             episode.df['grid_load_std'] = episode.standard_scalar.transform(episode.df[['grid_load']].values).flatten()
 
             _buffer.append(episode.df[['grid_load_std', 'aggregate_std']].values)  # Store the standardized grid load and aggregate load
@@ -146,7 +144,11 @@ class HNetworkRLModule:
 
         avg_loss = np.mean(loss_list)           # Calculate average loss over all batches
         std_loss = np.std(loss_list)             # Calculate standard deviation of loss over all batches
-        self.train_loss_list.append((avg_loss, std_loss))       # Append the average and std loss to the training loss list
+        self.train_loss_list.append({
+            'mean_loss': float(avg_loss),
+            'std_loss': float(std_loss),
+            'num_batches': int(len(dataloader))
+        })       # Append the average and std loss to the training loss list
         # print_log(f"Training H-network completed. Total batches: {len(dataloader)}; Average training loss: {avg_loss:.10f}")
         # print()
 
@@ -163,6 +165,7 @@ class HNetworkRLModule:
             h_network_target: torch.Tensor, target for the H-network
         Returns:
             f_signal: torch.Tensor, the computed f signal
+            additional_info: dict, contains additional information about the last predictions
         """
         if len(h_network_input) > self.H_NETWORK_MAXSEQLEN:
             h_network_input, h_network_target, h_network_mask = self._chunk_pad_mask_sequences(
@@ -232,8 +235,12 @@ class HNetworkRLModule:
 
         # return the loss. This approximates \mathbb{E} \log(p(y_t_plus_1 | z_t, y_t)) -> the sum of signals approximates the Mutual Information (MI)
         signal_output = signal_output[-1]        # only consider the last sample.
-        return signal_output.item()
-    
+        return signal_output.item(), \
+                {'predicted_mean': mean_masked[-1].item(), 
+                 'predicted_log_var': log_var_masked[-1].item() if self.h_network_type.value == HNetworkType.H_NETWORK2.value else 0,   # for H-Network, we fixed the variance to 1.0 -> log_var is 0
+                 'target': _target_masked[-1].item()
+                }
+
     def _create_h_network_sequences(self, replay_buffer):
         """
         Create sequences for H-network training from the replay buffer.
@@ -316,9 +323,13 @@ class HNetworkRLModule:
         """
         Save the training loss list to a file.
         Args:
-            file_path (Path): The path to save the training loss list.
+            file_path (Path): The path to save the training loss list as a json obj.
         """
-        np.save(file_path, np.array(self.train_loss_list))
+        if not self.train_loss_list:
+            raise ValueError("Training loss list is empty. Please train the H-network before saving the loss list.")
+
+        with open(file_path, 'w') as f:
+            json.dump(self.train_loss_list, f, indent=4, ensure_ascii=False)
 
     def save_h_network(self, file_path: Path):
         """

@@ -1,5 +1,6 @@
 from copy import deepcopy
 from PySide6.QtWidgets import QWidget, QVBoxLayout, QApplication, QLabel
+from PySide6.QtCore import Qt, QMetaObject, Q_ARG
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg, NavigationToolbar2QT
 from matplotlib.figure import Figure
 from PySide6.QtCore import QTimer
@@ -67,11 +68,10 @@ class RenderWindow(QWidget):
         # Start a timer for real-time plotting
         self.timer = QTimer(self)
         self.timer.timeout.connect(self.update_plot)
-        self.timer.start(200)  # 5 Hz
+        self.timer.start(500)  # 2 Hz
 
     def set_status(self, text):
         # Thread-safe update of the status label using QMetaObject.invokeMethod
-        from PySide6.QtCore import Qt, QMetaObject, Q_ARG
         QMetaObject.invokeMethod(self.status_label, "setText", Qt.QueuedConnection, Q_ARG(str, text))
         print_log(f"[RenderWindow] Status updated: {text}")
 
@@ -128,7 +128,7 @@ class RenderWindow(QWidget):
             ax1.set_title("Grid Load and User Load")
             ax1.set_xlabel("Time")
             ax1.set_ylabel("Load (W)")
-            ax1.set_ylim(0, 8200)  # Adjust y-axis limit as needed
+            # ax1.set_ylim(0, 8200)  # Adjust y-axis limit as needed
             ax1.legend()
             # Plot battery SOC
             ax2.plot(t, soc, label="Battery SOC")

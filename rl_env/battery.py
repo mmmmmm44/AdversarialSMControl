@@ -135,3 +135,15 @@ class RechargeableBattery:
             init_soc (float): Initial state of charge as a fraction of capacity (default is 0.5).
         """
         self.battery_soc = init_soc * self.capacity
+
+    def get_battery_config(self):
+        """
+        Returns the configuration of the battery as a dictionary.
+        """
+        return {
+            'capacity': self.capacity,
+            'max_charging_rate': self.max_charging_rate,
+            'max_discharging_rate': self.max_discharging_rate,
+            'efficiency': self.efficiency,
+            'initial_soc': self.battery_soc / self.capacity
+        }
