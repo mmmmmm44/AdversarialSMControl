@@ -8,6 +8,7 @@ from collections import deque
 import struct
 import json
 from pathlib import Path
+import math
 
 from render_window import RenderWindowControl, RenderWindowMessageType
 from env_data_loader import SmartMeterDataLoader
@@ -25,7 +26,20 @@ class SmartMeterWorld(gym.Env):
 
     metadata = {"render_modes": ["human"]}
 
-    def __init__(self, smart_meter_data_loader: SmartMeterDataLoader, h_network_rl_module: HNetworkRLModule, log_folder: Path, rb_config: Optional[dict] = None, render_mode=None, render_host='127.0.0.1', render_port=50007):
+    def __init__(self, smart_meter_data_loader: SmartMeterDataLoader, h_network_rl_module: HNetworkRLModule, log_folder: Path, rb_config: Optional[dict] = None, reward_lambda: float = 0.5, render_mode=None, render_host='127.0.0.1', render_port=50007):
+        '''
+        Initializes the SmartMeterWorld environment.
+        
+        Args:
+            smart_meter_data_loader (SmartMeterDataLoader): Data loader for smart meter data.
+            h_network_rl_module (HNetworkRLModule): H-network RL module for providing per-step privacy-related signals.
+            log_folder (Path): Folder to save logs and results.
+            rb_config (Optional[dict]): Configuration for the rechargeable battery. If None, default values are used.
+            reward_lambda (float): Weighting factor for the reward function, between 0 and 1.
+            render_mode (Optional[str]): Render mode for visualization. If 'human', it connects to a render server.
+            render_host (str): Host address of the render server.
+            render_port (int): Port number of the render server.
+        '''
         super(SmartMeterWorld, self).__init__()
 
         # TCP client for real-time rendering
@@ -76,7 +90,7 @@ class SmartMeterWorld(gym.Env):
 
         self.action_space = self.low_level_action_space
 
-        self.reward_lambda = 0.5        # value between [0,1]. Closer to zero -> more privacy focused
+        self.reward_lambda = reward_lambda        # value between [0,1]. Closer to zero -> more privacy focused
 
         # H-network stuffs
         self.h_network_rl_module = h_network_rl_module
@@ -212,6 +226,7 @@ class SmartMeterWorld(gym.Env):
         self.episode.df.iat[current_step, self.episode.df.columns.get_loc('grid_load')] = z_t  # update the grid load in the dataframe
 
         # reward function
+        # logic: when computing the reward, we are already passed `duration` number of seconds, so we can use the next step's aggregate load to compute the reward. (as the next step's aggregate load will be our observation)
 
         g_signal = self._g_signal(
             s_t_datetime=self.episode.df.iloc[current_step]['datetime'],
@@ -248,7 +263,7 @@ class SmartMeterWorld(gym.Env):
             self.h_network_rl_module.push_to_replay_buffer(self.episode)
 
             # calculate the sum of rewards for the episode
-            episode_sum = sum(self.per_episode_rewards)
+            episode_sum = math.fsum(self.per_episode_rewards)
             episode_reward_stats = {
                 "sum": float(episode_sum),
                 "mean": float(np.mean(self.per_episode_rewards)),
@@ -283,7 +298,7 @@ class SmartMeterWorld(gym.Env):
             'datetime': self.episode.df.iloc[self.episode.get_current_step()]['datetime'].isoformat(timespec='seconds') if self.episode.get_current_step() < len(self.episode.df) else None,
             "battery_soc (%)": float(obs["battery_soc"][0]),
             "battery_soc (kWh)": float(obs["battery_soc"][0]) * self.battery.capacity,  # convert normalized SoC to kWh
-            "user_load (W)": float(self.episode.df.iloc[self.episode.get_current_step()]['aggregate']) if self.episode.get_current_step() > 0 else None,
+            "user_load (W)": float(self.episode.df.iloc[self.episode.get_current_step()]['aggregate']) if self.episode.get_current_step() >= 0 else None,
             "grid_load (W)": float(self.episode.df.iloc[self.episode.get_current_step() - 1]['grid_load']) if self.episode.get_current_step() > 0 else None,
             "action (kW)": float(power_kw) if power_kw is not None else None,
             "battery_action (kW)": float(power_charged_discharged) if power_charged_discharged is not None else None,
