@@ -213,3 +213,4 @@ __marimo__/
 rl_model/
 model_trained/
 experiments/
+*.pdf
