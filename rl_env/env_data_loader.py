@@ -61,4 +61,7 @@ class SmartMeterDataLoader:
         # we need the timestamp to create datetime related features in the environment
         aggregate_load = aggregate_load[['timestamp', 'aggregate', 'datetime']]
 
+        # we also add a column for the segment index
+        aggregate_load['segment_index'] = index
+
         return aggregate_load

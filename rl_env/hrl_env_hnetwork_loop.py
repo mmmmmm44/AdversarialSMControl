@@ -9,6 +9,7 @@ import struct
 import json
 from pathlib import Path
 import math
+from enum import Enum
 
 from render_window import RenderWindowControl, RenderWindowMessageType
 from env_data_loader import SmartMeterDataLoader
@@ -16,6 +17,14 @@ from battery import RechargeableBattery
 from model.H_network.h_network_rl_module import HNetworkRLModule
 from hrl_env_episode import SmartMeterEpisode
 from utils import print_log
+
+class TrainingMode(Enum):
+    TRAIN = "train"
+    VALIDATE = "validate"
+    TEST = "test"
+
+    def __str__(self):
+        return self.value
    
 
 class SmartMeterWorld(gym.Env):
@@ -26,13 +35,14 @@ class SmartMeterWorld(gym.Env):
 
     metadata = {"render_modes": ["human"]}
 
-    def __init__(self, smart_meter_data_loader: SmartMeterDataLoader, h_network_rl_module: HNetworkRLModule, log_folder: Path, rb_config: Optional[dict] = None, reward_lambda: float = 0.5, render_mode=None, render_host='127.0.0.1', render_port=50007):
+    def __init__(self, smart_meter_data_loader: SmartMeterDataLoader, h_network_rl_module: HNetworkRLModule, mode: TrainingMode, log_folder: Path, rb_config: Optional[dict] = None, reward_lambda: float = 0.5, render_mode=None, render_host='127.0.0.1', render_port=50007):
         '''
         Initializes the SmartMeterWorld environment.
         
         Args:
             smart_meter_data_loader (SmartMeterDataLoader): Data loader for smart meter data.
             h_network_rl_module (HNetworkRLModule): H-network RL module for providing per-step privacy-related signals.
+            mode (TrainingMode): The mode of the environment (train, validate, test).
             log_folder (Path): Folder to save logs and results.
             rb_config (Optional[dict]): Configuration for the rechargeable battery. If None, default values are used.
             reward_lambda (float): Weighting factor for the reward function, between 0 and 1.
@@ -51,6 +61,8 @@ class SmartMeterWorld(gym.Env):
         self.smart_meter_data_loader = smart_meter_data_loader
         if not self.smart_meter_data_loader:
             raise ValueError("No SmartMeterDataLoader provided.")
+        self.mode = mode
+        assert self.mode in [TrainingMode.TRAIN, TrainingMode.VALIDATE, TrainingMode.TEST], "Invalid mode. Must be one of TRAIN, VALIDATE, TEST."
 
         # initialize an episode
         self.selected_idx = 0
@@ -110,7 +122,7 @@ class SmartMeterWorld(gym.Env):
             # Try to connect to the render server
             self._init_render_client()
 
-            print_log(f"[SmartMeterWorld] Render mode set to '{self.render_mode}'. Render server at {self.render_host}:{self.render_port}. render_connected: {self.render_connected}. render_client_socket: {self.render_client_socket}")
+            print_log(f"[SmartMeterWorld {str(self.mode).capitalize()}]] Render mode set to '{self.render_mode}'. Render server at {self.render_host}:{self.render_port}. render_connected: {self.render_connected}. render_client_socket: {self.render_client_socket}")
 
     def _init_render_client(self):
         import socket
@@ -119,7 +131,7 @@ class SmartMeterWorld(gym.Env):
             self.render_client_socket.connect((self.render_host, self.render_port))
             self.render_connected = True
         except Exception as e:
-            print_log(f"[SmartMeterWorld] Could not connect to render server: {e}")
+            print_log(f"[SmartMeterWorld {str(self.mode).capitalize()}] Could not connect to render server: {e}")
             self.render_connected = False
 
     def _get_obs(self):
@@ -171,7 +183,7 @@ class SmartMeterWorld(gym.Env):
         self.episode = SmartMeterEpisode(self.smart_meter_data_loader.get_aggregate_load_segment(self.selected_idx))  # Reset with a new episode
         self.episode_info_list = []
 
-        print_log(f"[SmartMeterWorld] Resetting environment with a new episode. Episode info: {self.episode.get_episode_info()}")
+        print_log(f"[SmartMeterWorld {str(self.mode).capitalize()}] Resetting environment with a new episode. Episode info: {self.episode.get_episode_info()}")
 
         self.send_env_info()  # send the environment info to the render window
 
@@ -244,13 +256,12 @@ class SmartMeterWorld(gym.Env):
         reward = - (self.reward_lambda * g_signal + (1 - self.reward_lambda) * f_signal)
         self.per_episode_rewards.append(reward)  # logging use; append the reward to the current episode rewards
 
-        # determine termination condition
-        terminated = current_step >= self.episode.get_episode_length() - 1 - 1      # -1 because we want to stop before the last step to avoid index out of range
+        self.episode.set_current_step(current_step + 1)
 
-        if not terminated:
-            # Update the current step
-            self.episode.set_current_step(current_step + 1)
-        
+        # determine termination condition
+        terminated = self.episode.get_current_step() >= self.episode.get_episode_length() - 1     # -1 because we want to stop before the last step to avoid index out of range
+
+
         next_obs = self._get_obs()
         next_info = self._get_info(
             obs=next_obs, power_kw=power_kw, power_charged_discharged=power_charged_discharged, reward=reward, f_signal=f_signal, g_signal=g_signal, f_signal_additional_info=f_signal_additional_info
@@ -259,8 +270,9 @@ class SmartMeterWorld(gym.Env):
 
         # log the episode when terminated
         if terminated:
-            # push the old episode to the HNetworkRLModule buffer
-            self.h_network_rl_module.push_to_replay_buffer(self.episode)
+            # push the old episode to the HNetworkRLModule buffer when only in training mode
+            if self.mode == TrainingMode.TRAIN:
+                self.h_network_rl_module.push_to_replay_buffer(self.episode)
 
             # calculate the sum of rewards for the episode
             episode_sum = math.fsum(self.per_episode_rewards)
@@ -272,9 +284,17 @@ class SmartMeterWorld(gym.Env):
             self.episodes_rewards.append(episode_reward_stats)
             self.per_episode_rewards = []  # reset the per-episode rewards for the next episode
 
-            self._save_episode_info_list(self.log_folder, len(self.episodes_rewards))
+            if self.mode == TrainingMode.TRAIN:
+                self._save_episode_info_list(self.log_folder, len(self.episodes_rewards))
+            else:
+                self._save_episode_info_list(self.log_folder, self.selected_idx)
 
-            print_log(f"[SmartMeterWorld] Episode finished. Sum of rewards: {episode_sum}. Mean of rewards: {episode_reward_stats['mean']}. Std of rewards: {episode_reward_stats['std']}")
+            if self.mode == TrainingMode.TRAIN:
+                self._save_episode_df(self.log_folder, len(self.episodes_rewards))  # save the episode DataFrame, name the file based on the number of episodes trained so far
+            else:
+                self._save_episode_df(self.log_folder, self.selected_idx)       # name the file based on episode index (in the validation and test datasets)
+
+            print_log(f"[SmartMeterWorld {str(self.mode).capitalize()}] Episode finished. Sum of rewards: {episode_sum}. Mean of rewards: {episode_reward_stats['mean']}. Std of rewards: {episode_reward_stats['std']}")
 
         return next_obs, \
             reward, \
@@ -319,6 +339,18 @@ class SmartMeterWorld(gym.Env):
         return {
             "reward_lambda": self.reward_lambda,
         }
+    
+    def set_log_folder(self, log_folder: Path):
+        """
+        Set the log folder for saving episode data and environment configuration.
+        Args:
+            log_folder (Path): The folder to save logs and results.
+        """
+        self.log_folder = log_folder
+        if not self.log_folder.exists():
+            self.log_folder.mkdir(parents=True)
+        
+        print_log(f"[SmartMeterWorld {str(self.mode).capitalize()}] Log folder set to {self.log_folder}")
 
     def _create_timestamp_features(self, timestamp: int) -> np.ndarray:
         """
@@ -346,45 +378,53 @@ class SmartMeterWorld(gym.Env):
             float: Calculated cost signal.
         """
 
-        # return cost incurred for the power used in the time period
+        # tariff has two part: standing-charge (per-day) and time-of-use price
+        standing_charge_per_day = 0.4734 # in GBP
 
-        return self._get_weighted_electricity_cost(s_t_datetime, s_t_plus_1_datetime) * abs(power_kw)
-    
-    def _get_weighted_electricity_cost(self, s_t_datetime: datetime, s_t_plus_1_datetime: datetime) -> float:
-        """
-        Calculate the weighted electricity cost based on a time-of-use pricing model.
-        Args:
-            s_t_datetime (datetime): Current timestamp.
-            s_t_plus_1_datetime (datetime): Next timestamp.
-        Returns:
-            float: Weighted electricity cost, across the time period. (i.e. delta_t * avg_price_per_kWh)
-        """
         # we implement a time-of-use pricing model
         # declare the time-of-use pricing model
+        # time_of_use_prices = {
+        #     (time(0,0,0,0), time(7,0,0,0)): 0.101,  # off-peak price
+        #     (time(7,0,0,0), time(11,0,0,0)): 0.208,   # peak price
+        #     (time(11,0,0,0), time(17,0,0,0)): 0.144,  # mid-peak price
+        #     (time(17,0,0,0), time(19,0,0,0)): 0.208,   # peak price
+        #     (time(19,0,0,0), time(23,59,59,999999)): 0.101,  # evening price
+        # }
+        # time-of-use prices (electricity) in GBP per kWh
         time_of_use_prices = {
-            (time(0,0,0,0), time(7,0,0,0)): 0.101,  # off-peak price
-            (time(7,0,0,0), time(11,0,0,0)): 0.208,   # peak price
-            (time(11,0,0,0), time(17,0,0,0)): 0.144,  # mid-peak price
-            (time(17,0,0,0), time(19,0,0,0)): 0.208,   # peak price
-            (time(19,0,0,0), time(23,59,59,999999)): 0.101,  # evening price
+            (time(0,0,0,0), time(7,0,0,0)): 0.1317,              # off-peak price
+            (time(7,0,0,0), time(23,59,59,999999)): 0.3075,      # peak price
         }
 
-        # compute the weighted electricity cost
-        total_cost = 0.0
-        for start_time, end_time in time_of_use_prices.keys():
-            if s_t_datetime.time() <= end_time and s_t_plus_1_datetime.time() >= start_time:
-                # Calculate the overlap between the time intervals
-                overlap_start = max(s_t_datetime, datetime.combine(s_t_datetime.date(), start_time))
-                overlap_end = min(s_t_plus_1_datetime, datetime.combine(s_t_plus_1_datetime.date(), end_time))
-                
-                if overlap_start < overlap_end:
-                    overlap_duration = (overlap_end - overlap_start).total_seconds() / 3600.0  # Convert to hours
-                    price_per_kwh = time_of_use_prices[(start_time, end_time)]
-                    total_cost += overlap_duration * price_per_kwh
+        def _get_weighted_electricity_cost(self, s_t_datetime: datetime, s_t_plus_1_datetime: datetime) -> float:
+            """
+            Calculate the weighted electricity cost based on a time-of-use pricing model.
+            Args:
+                s_t_datetime (datetime): Current timestamp.
+                s_t_plus_1_datetime (datetime): Next timestamp.
+            Returns:
+                float: Weighted electricity cost, across the time period. (i.e. delta_t * avg_price_per_kWh)
+            """
 
-        return total_cost
+            # compute the weighted electricity cost
+            total_cost = 0.0
+            for start_time, end_time in time_of_use_prices.keys():
+                if s_t_datetime.time() <= end_time and s_t_plus_1_datetime.time() >= start_time:
+                    # Calculate the overlap between the time intervals
+                    overlap_start = max(s_t_datetime, datetime.combine(s_t_datetime.date(), start_time))
+                    overlap_end = min(s_t_plus_1_datetime, datetime.combine(s_t_plus_1_datetime.date(), end_time))
+                    
+                    if overlap_start < overlap_end:
+                        overlap_duration = (overlap_end - overlap_start).total_seconds() / 3600.0  # Convert to hours
+                        price_per_kwh = time_of_use_prices[(start_time, end_time)]
+                        total_cost += overlap_duration * price_per_kwh
 
-    
+            return total_cost
+
+        # return cost incurred for the power used in the time period
+        return _get_weighted_electricity_cost(s_t_datetime, s_t_plus_1_datetime) * abs(power_kw) + standing_charge_per_day * ((s_t_plus_1_datetime - s_t_datetime).total_seconds() / (24 * 60 * 60))  # convert seconds to days
+
+
     def _f_signal(self, y_t: float, z_t: float, y_t_plus_1: float) -> float:
         """
         Calculate the H-network reward based on the user's load and load received from the grid
@@ -425,7 +465,25 @@ class SmartMeterWorld(gym.Env):
         f_signal, additional_info = self.h_network_rl_module.compute_f_signal(h_network_input, h_network_target)
         return f_signal, additional_info
     
-    def _save_episode_info_list(self, log_folder:Path, episode_idx:int):
+    def _save_episode_df(self, log_folder: Path, episode_idx: int):
+        """
+        Save the episode DataFrame to a pickle file.
+        Args:
+            log_folder (Path): The folder to save the episode DataFrame.
+            episode_idx (int): The index of the episode to save.
+        """
+        target_folder = log_folder / "episodes_df"
+
+        if not target_folder.exists():
+            target_folder.mkdir(parents=True)
+
+        episode_df_path = target_folder / f"episode_{episode_idx:0>4}.pkl"
+
+        self.episode.df.to_pickle(episode_df_path)
+
+        print_log(f"Episode {episode_idx:0>4} DataFrame saved to {episode_df_path}")
+
+    def _save_episode_info_list(self, log_folder: Path, episode_idx: int):
         """
         Save the infos of the whole episode to a json file
         Args:
@@ -456,7 +514,7 @@ class SmartMeterWorld(gym.Env):
         file_path = folder_path / "episodes_rewards.json"
         with open(file_path, "w") as f:
             json.dump(self.episodes_rewards, f, indent=4)
-        print_log(f"[SmartMeterWorld] Episodes rewards saved to {file_path}")
+        print_log(f"[SmartMeterWorld {str(self.mode).capitalize()}] Episodes rewards saved to {file_path}")
 
     def _create_env_config(self):
         """
@@ -485,7 +543,7 @@ class SmartMeterWorld(gym.Env):
         with open(env_config_path, "w") as f:
             json.dump(self._create_env_config(), f, indent=4)
 
-        print_log(f"[SmartMeterWorld] Environment config saved to {env_config_path}")
+        print_log(f"[SmartMeterWorld {str(self.mode).capitalize()}] Environment config saved to {env_config_path}")
 
     def render(self):
         """
@@ -506,7 +564,7 @@ class SmartMeterWorld(gym.Env):
                 msg_len = struct.pack('>I', len(json_data))     # include a 4-byte length prefix to tell the render server how long the message is (for TCP stream)
                 self.render_client_socket.sendall(msg_len + json_data)
             except Exception as e:
-                print_log(f"[SmartMeterWorld] Failed to send message to render server: {e}")
+                print_log(f"[SmartMeterWorld {str(self.mode).capitalize()}] Failed to send message to render server: {e}")
 
     def _plot_graphs(self, send_tcp=False):
         """
@@ -570,11 +628,11 @@ class SmartMeterWorld(gym.Env):
             try:
                 self.render_client_socket.close()
             except Exception as e:
-                print_log(f"[SmartMeterWorld] Error closing render client socket: {e}")
+                print_log(f"[SmartMeterWorld {str(self.mode).capitalize()}] Error closing render client socket: {e}")
             self.render_client_socket = None
             self.render_connected = False
 
-        print_log("[SmartMeterWorld] Environment closed.")
+        print_log(f"[SmartMeterWorld {str(self.mode).capitalize()}] Environment closed.")
 
     def terminate_render_window(self):
         """Request the render window to terminate itself. This will also close the render client socket."""

@@ -79,3 +79,11 @@ class SmartMeterEpisode:
             raise ValueError("Aggregate load data not found in the DataFrame.")
         
         self.df['aggregate_std'] = self.standard_scalar.fit_transform(self.df[['aggregate']].values).flatten()
+
+    def save_df(self, file_path: str):
+        """
+        Save the episode DataFrame to a pkl file.
+        Args:
+            file_path (str): The path to the pkl file.
+        """
+        self.df.to_pickle(file_path)
