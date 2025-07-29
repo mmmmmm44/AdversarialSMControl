@@ -7,20 +7,18 @@ It also includes methods to calculate the energy stored in the battery and to re
 
 class RechargeableBattery:
     
-    def __init__(self, capacity, max_charging_rate, max_discharging_rate, efficiency=1, init_soc=0.5):
+    def __init__(self, capacity, max_charging_rate, efficiency=1, init_soc=0.5):
         """
         Initializes the rechargeable battery with given parameters.
         Parameters:
             capacity (float): Total capacity of the battery in Wh.
-            max_charging_rate (float): Maximum charging rate in kW.
-            max_discharging_rate (float): Maximum discharging rate in kW.
+            max_charging_rate (float): Maximum charging/discharging rate in kW.
             efficiency (float): Efficiency of charging/discharging (default is 1, i.e., 100%).
             init_soc (float): Initial state of charge (SoC) as a fraction of capacity (default is 0.5).
         """
 
         self.capacity = capacity  # Total capacity in kWh
-        self.max_charging_rate = max_charging_rate  # Max charging rate in kW
-        self.max_discharging_rate = max_discharging_rate  # Max discharging rate in kW
+        self.max_charging_rate = max_charging_rate  # Max charging / discharging rate in kW
         self.efficiency = efficiency  # Charging/discharging efficiency
         self.battery_soc = init_soc * capacity  # Initial state of charge
 
@@ -115,7 +113,7 @@ class RechargeableBattery:
         """
         if normalized_action < 0:
             # Discharging
-            unnormalized_charge = normalized_action * self.max_discharging_rate
+            unnormalized_charge = normalized_action * self.max_charging_rate
         else:
             # Charging
             unnormalized_charge = normalized_action * self.max_charging_rate
@@ -143,7 +141,6 @@ class RechargeableBattery:
         return {
             'capacity': self.capacity,
             'max_charging_rate': self.max_charging_rate,
-            'max_discharging_rate': self.max_discharging_rate,
             'efficiency': self.efficiency,
             'initial_soc': self.battery_soc / self.capacity
         }

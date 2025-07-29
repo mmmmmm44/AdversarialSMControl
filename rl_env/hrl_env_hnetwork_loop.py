@@ -9,38 +9,32 @@ import struct
 import json
 from pathlib import Path
 import math
-from enum import Enum
 
+
+from training_mode import TrainingMode
 from render_window import RenderWindowControl, RenderWindowMessageType
-from env_data_loader import SmartMeterDataLoader
+from data_loader import BaseSmartMeterDataLoader
 from battery import RechargeableBattery
-from model.H_network.h_network_rl_module import HNetworkRLModule
+from model.H_network.h_network_rl_continuous_act import HNetworkRLModule
 from hrl_env_episode import SmartMeterEpisode
 from utils import print_log
-
-class TrainingMode(Enum):
-    TRAIN = "train"
-    VALIDATE = "validate"
-    TEST = "test"
-
-    def __str__(self):
-        return self.value
    
 
 class SmartMeterWorld(gym.Env):
     """
-    Smart Meter World Environment for Hierarchical Reinforcement Learning.
+    Smart Meter World Environment for Reinforcement Learning.
     This environment simulates a energy management unit connected with a rechargeable battery.
+    The charging/discharging action of the battery is continuous
     """
 
     metadata = {"render_modes": ["human"]}
 
-    def __init__(self, smart_meter_data_loader: SmartMeterDataLoader, h_network_rl_module: HNetworkRLModule, mode: TrainingMode, log_folder: Path, rb_config: Optional[dict] = None, reward_lambda: float = 0.5, render_mode=None, render_host='127.0.0.1', render_port=50007):
+    def __init__(self, smart_meter_data_loader: BaseSmartMeterDataLoader, h_network_rl_module: HNetworkRLModule, mode: TrainingMode, log_folder: Path, rb_config: Optional[dict] = None, reward_lambda: float = 0.5, render_mode=None, render_host='127.0.0.1', render_port=50007):
         '''
         Initializes the SmartMeterWorld environment.
         
         Args:
-            smart_meter_data_loader (SmartMeterDataLoader): Data loader for smart meter data.
+            smart_meter_data_loader (BaseSmartMeterDataLoader): Data loader for smart meter data (supports both simple and curriculum loaders).
             h_network_rl_module (HNetworkRLModule): H-network RL module for providing per-step privacy-related signals.
             mode (TrainingMode): The mode of the environment (train, validate, test).
             log_folder (Path): Folder to save logs and results.
@@ -60,9 +54,20 @@ class SmartMeterWorld(gym.Env):
 
         self.smart_meter_data_loader = smart_meter_data_loader
         if not self.smart_meter_data_loader:
-            raise ValueError("No SmartMeterDataLoader provided.")
+            raise ValueError("No BaseSmartMeterDataLoader provided.")
+        
         self.mode = mode
-        assert self.mode in [TrainingMode.TRAIN, TrainingMode.VALIDATE, TrainingMode.TEST], "Invalid mode. Must be one of TRAIN, VALIDATE, TEST."
+        assert self.mode.value in [TrainingMode.TRAIN.value, TrainingMode.VALIDATE.value, TrainingMode.TEST.value], "Invalid mode. Must be one of TRAIN, VALIDATE, TEST."
+
+        # Curriculum learning support - track training timesteps for curriculum scheduling
+        self.training_timestep = 0
+        self.curriculum_info = self.smart_meter_data_loader.get_curriculum_info()
+        
+        print_log(f"[SmartMeterWorld {str(self.mode).capitalize()}] Using data loader: {type(self.smart_meter_data_loader).__name__}")
+        print_log(f"[SmartMeterWorld {str(self.mode).capitalize()}] Curriculum enabled: {self.curriculum_info.get('curriculum_enabled', False)}")
+        if self.curriculum_info.get('curriculum_enabled', False):
+            print_log(f"[SmartMeterWorld {str(self.mode).capitalize()}] Episode lengths available: {list(self.curriculum_info.get('episodes_by_length', {}).keys())} days")
+            print_log(f"[SmartMeterWorld {str(self.mode).capitalize()}] Total episodes: {self.curriculum_info.get('total_episodes', 0)}")
 
         # initialize an episode
         self.selected_idx = 0
@@ -75,7 +80,6 @@ class SmartMeterWorld(gym.Env):
         self.battery = RechargeableBattery(**rb_config) if rb_config else RechargeableBattery(
                 capacity=8.0,  # kWh
                 max_charging_rate=4.0,  # kW
-                max_discharging_rate=4.0,  # kW
                 efficiency=1.0,  # 100% efficiency
                 init_soc=self.init_soc  # 50% initial state of charge
         )
@@ -173,17 +177,27 @@ class SmartMeterWorld(gym.Env):
         self.per_episode_rewards = []
 
         # select an episode to reset with
-        # if episode_idx is None, randomly select an episode from the available episodes
-        # if episode_idx is provided, check if it is valid and use it; otherwise,
-        # randomly select an aggregate load DataFrame from the list
+        # if episode_idx is None, use curriculum sampling (if available) or random selection
+        # if episode_idx is provided, check if it is valid and use it
         if episode_idx is not None and (episode_idx < 0 or episode_idx >= self.smart_meter_data_loader.get_divided_segments_length()):
             raise ValueError(f"Invalid episode index: {episode_idx}. Must be between 0 and {self.smart_meter_data_loader.get_divided_segments_length() - 1}.")
 
-        self.selected_idx = episode_idx if episode_idx is not None else int(self.np_random.integers(0, self.smart_meter_data_loader.get_divided_segments_length()))
+        # Use curriculum sampling if no specific episode is requested
+        if episode_idx is None:
+            self.selected_idx = self.smart_meter_data_loader.sample_episode_index(self.np_random, self.training_timestep)
+        else:
+            self.selected_idx = episode_idx
+            
         self.episode = SmartMeterEpisode(self.smart_meter_data_loader.get_aggregate_load_segment(self.selected_idx))  # Reset with a new episode
         self.episode_info_list = []
 
-        print_log(f"[SmartMeterWorld {str(self.mode).capitalize()}] Resetting environment with a new episode. Episode info: {self.episode.get_episode_info()}")
+        # Get episode metadata for enhanced logging
+        episode_metadata = self.smart_meter_data_loader.get_episode_metadata(self.selected_idx)
+        episode_length_days = episode_metadata.get('episode_length_days', 1)
+        
+        print_log(f"[SmartMeterWorld {str(self.mode).capitalize()}] Resetting environment with episode {self.selected_idx}. Episode info: {self.episode.get_episode_info()}")
+        if self.curriculum_info.get('curriculum_enabled', False):
+            print_log(f"[SmartMeterWorld {str(self.mode).capitalize()}] Episode length: {episode_length_days} day(s), Training timestep: {self.training_timestep}")
 
         self.send_env_info()  # send the environment info to the render window
 
@@ -258,6 +272,10 @@ class SmartMeterWorld(gym.Env):
 
         self.episode.set_current_step(current_step + 1)
 
+        # Increment training timestep for curriculum learning (only during training)
+        if self.mode.value == TrainingMode.TRAIN.value:
+            self.training_timestep += 1
+
         # determine termination condition
         terminated = self.episode.get_current_step() >= self.episode.get_episode_length() - 1     # -1 because we want to stop before the last step to avoid index out of range
 
@@ -271,7 +289,7 @@ class SmartMeterWorld(gym.Env):
         # log the episode when terminated
         if terminated:
             # push the old episode to the HNetworkRLModule buffer when only in training mode
-            if self.mode == TrainingMode.TRAIN:
+            if self.mode.value == TrainingMode.TRAIN.value:
                 self.h_network_rl_module.push_to_replay_buffer(self.episode)
 
             # calculate the sum of rewards for the episode
@@ -284,12 +302,12 @@ class SmartMeterWorld(gym.Env):
             self.episodes_rewards.append(episode_reward_stats)
             self.per_episode_rewards = []  # reset the per-episode rewards for the next episode
 
-            if self.mode == TrainingMode.TRAIN:
+            if self.mode.value == TrainingMode.TRAIN.value:
                 self._save_episode_info_list(self.log_folder, len(self.episodes_rewards))
             else:
                 self._save_episode_info_list(self.log_folder, self.selected_idx)
 
-            if self.mode == TrainingMode.TRAIN:
+            if self.mode.value == TrainingMode.TRAIN.value:
                 self._save_episode_df(self.log_folder, len(self.episodes_rewards))  # save the episode DataFrame, name the file based on the number of episodes trained so far
             else:
                 self._save_episode_df(self.log_folder, self.selected_idx)       # name the file based on episode index (in the validation and test datasets)
@@ -326,7 +344,7 @@ class SmartMeterWorld(gym.Env):
             "f_signal": float(f_signal) if f_signal is not None else None,
             "g_signal": float(g_signal) if g_signal is not None else None,
         }
-        info_dict.update({"f_signal" + "-" + k : float(v) for k, v in f_signal_additional_info.items()} if f_signal_additional_info is not None else {})
+        info_dict.update({"f_signal" + "-" + k : v for k, v in f_signal_additional_info.items()} if f_signal_additional_info is not None else {})
 
         return info_dict
     
@@ -338,7 +356,29 @@ class SmartMeterWorld(gym.Env):
         """
         return {
             "reward_lambda": self.reward_lambda,
+            "training_timestep": self.training_timestep,
+            "curriculum_info": self.curriculum_info,
+            "data_loader_type": type(self.smart_meter_data_loader).__name__
         }
+    
+    def set_training_timestep(self, timestep: int):
+        """
+        Set the current training timestep for curriculum learning.
+        Args:
+            timestep (int): Current training timestep
+        """
+        self.training_timestep = timestep
+        print_log(f"[SmartMeterWorld {str(self.mode).capitalize()}] Training timestep set to {timestep}")
+    
+    def get_curriculum_probabilities(self):
+        """
+        Get current curriculum probabilities if using curriculum loader.
+        Returns:
+            dict: Dictionary mapping episode length to probability, or empty dict if not using curriculum
+        """
+        if hasattr(self.smart_meter_data_loader, 'get_current_curriculum_probs'):
+            return self.smart_meter_data_loader.get_current_curriculum_probs(self.training_timestep)
+        return {}
     
     def set_log_folder(self, log_folder: Path):
         """
@@ -396,7 +436,7 @@ class SmartMeterWorld(gym.Env):
             (time(7,0,0,0), time(23,59,59,999999)): 0.3075,      # peak price
         }
 
-        def _get_weighted_electricity_cost(self, s_t_datetime: datetime, s_t_plus_1_datetime: datetime) -> float:
+        def _get_weighted_electricity_cost(s_t_datetime: datetime, s_t_plus_1_datetime: datetime) -> float:
             """
             Calculate the weighted electricity cost based on a time-of-use pricing model.
             Args:
@@ -485,7 +525,7 @@ class SmartMeterWorld(gym.Env):
 
     def _save_episode_info_list(self, log_folder: Path, episode_idx: int):
         """
-        Save the infos of the whole episode to a json file
+        Save the infos of the whole episode to a json file with enhanced episode identification.
         Args:
             log_folder (Path): The folder to save the episode info.
             episode_idx (int): The index of the episode to save.
@@ -495,12 +535,44 @@ class SmartMeterWorld(gym.Env):
         if not target_folder.exists():
             target_folder.mkdir(parents=True)
 
+        # Get episode metadata for identification
+        # episode_metadata = self.smart_meter_data_loader.get_episode_metadata(self.selected_idx)
+        
+        # Get episode content information from the episode DataFrame
+        episode_content_id = None
+        episode_length_days = None
+        if hasattr(self.episode, 'df') and not self.episode.df.empty:
+            if 'episode_content_id' in self.episode.df.columns:
+                episode_content_id = self.episode.df['episode_content_id'].iloc[0]
+            if 'episode_length_days' in self.episode.df.columns:
+                episode_length_days = self.episode.df['episode_length_days'].iloc[0]
+        
+        # Enhanced episode metadata
+        enhanced_metadata = {
+            "episode_training_idx": int(episode_idx),  # Training sequence number
+            "episode_data_idx": int(self.selected_idx),  # Index in data loader
+            "episode_content_id": episode_content_id,  # Content-based unique identifier
+            "episode_length_days": int(episode_length_days),  # Episode length in days
+            "training_timestep": int(self.training_timestep),  # Current training timestep
+            "dataset_type": str(self.mode.value),  # train/validate/test
+            "curriculum_info": self.curriculum_info,  # Curriculum information
+            "timestamp_created": datetime.now().isoformat()
+        }
+        
+        # Save episode with enhanced metadata
+        episode_info_with_metadata = {
+            "metadata": enhanced_metadata,
+            "episode_data": self.episode_info_list
+        }
+
         episode_info_list_path = target_folder / f"episode_{episode_idx:0>4}_info.json"
 
         with open(episode_info_list_path, "w") as f:
-            json.dump(self.episode_info_list, f, indent=4)
+            json.dump(episode_info_with_metadata, f, indent=4)
 
         print_log(f"Episode {episode_idx:0>4} info saved to {episode_info_list_path}")
+        if episode_content_id:
+            print_log(f"Episode content ID: {episode_content_id}, Length: {episode_length_days} day(s)")
 
     def save_episodes_rewards(self, folder_path: Path):
         """
@@ -520,13 +592,16 @@ class SmartMeterWorld(gym.Env):
         """
         Create the environment configuration dictionary.
         Returns:
-            dict: Environment configuration including battery settings, reward lambda, and H-network module settings.
+            dict: Environment configuration including battery settings, reward lambda, curriculum info, and H-network module settings.
         """
         env_config = {
             "battery": self.battery.get_battery_config(),
             "reward_lambda": self.reward_lambda,
             "h_network_type": str(self.h_network_rl_module.h_network_type),
             "init_soc": self.init_soc,
+            "data_loader_type": type(self.smart_meter_data_loader).__name__,
+            "curriculum_info": self.curriculum_info,
+            "training_timestep": self.training_timestep
         }
         return env_config
 

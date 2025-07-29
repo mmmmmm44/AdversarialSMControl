@@ -6,7 +6,7 @@ import json
 from typing import Any
 from datetime import datetime
 
-from model.H_network.h_network_rl_module import HNetworkRLModule
+from model.H_network.h_network_rl_continuous_act import HNetworkRLModule
 from model.H_network.h_network_arch import HNetworkType
 from utils import print_log
 
@@ -81,7 +81,7 @@ class SaveCheckpointEveryNEpisodes(BaseCallback):
 
     def _init_callback(self) -> None:
         # Create folder if needed
-        if self.save_folder is not None:
+        if ((self.save_folder is not None) and (not self.save_folder.exists())):
             Path(self.save_folder).mkdir(parents=True)
 
     def _on_step(self) -> bool:

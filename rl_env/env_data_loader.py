@@ -1,8 +1,10 @@
 import pandas as pd
 import numpy as np
 from datetime import timedelta
+from typing import Optional
+from data_loader.base_data_loader import BaseSmartMeterDataLoader
 
-class SmartMeterDataLoader:
+class SmartMeterDataLoader(BaseSmartMeterDataLoader):
     def __init__(self, aggregate_load_segments: list, 
                  aggregate_load_df: pd.DataFrame, 
                  segment_length: int = 24):
@@ -65,3 +67,15 @@ class SmartMeterDataLoader:
         aggregate_load['segment_index'] = index
 
         return aggregate_load
+    
+    def sample_episode_index(self, timestep: Optional[int] = None) -> int:
+        """
+        Sample an episode index uniformly (simple implementation).
+        
+        Args:
+            timestep (Optional[int]): Current training timestep (ignored in simple implementation)
+            
+        Returns:
+            int: Randomly sampled episode index
+        """
+        return np.random.randint(0, self.get_divided_segments_length())
