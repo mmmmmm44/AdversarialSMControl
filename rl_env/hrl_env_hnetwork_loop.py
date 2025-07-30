@@ -601,7 +601,6 @@ class SmartMeterWorld(gym.Env):
             "init_soc": self.init_soc,
             "data_loader_type": type(self.smart_meter_data_loader).__name__,
             "curriculum_info": self.curriculum_info,
-            "training_timestep": self.training_timestep
         }
         return env_config
 

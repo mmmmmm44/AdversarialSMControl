@@ -215,3 +215,6 @@ model_trained/
 experiments/
 *.pdf
 rl_env/octopus_2025Jul_Tariff.png
+
+chat_history/
+test_suite/
