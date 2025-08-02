@@ -22,6 +22,7 @@ from .base import BatteryFactory
 from .common import create_battery
 from .continuous import RechargeableBattery
 from .discrete import RechargeableBatteryDiscrete
+from .tariff import TIME_OF_USE_PRICES, STANDING_CHARGE
 
 __all__ = [
     'BatteryFactory',

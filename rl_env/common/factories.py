@@ -386,6 +386,35 @@ def create_environment(action_type: str, **kwargs):
         return SmartMeterDiscreteEnv(**kwargs)
     else:
         raise ValueError(f"Unsupported action type: {action_type}")
+    
+def _get_environment_defaults(action_type: str) -> Dict[str, Any]:
+    """
+    Get default environment configuration for the given action type.
+    
+    Args:
+        action_type: Type of action space ('continuous' or 'discrete').
+        
+    Returns:
+        Dictionary of default configuration values.
+    """
+    action_type = _validate_action_type(action_type)
+
+    defaults = {
+        'rb_config': None,
+        'reward_lambda': 0.5,
+        'render_mode': None,
+        'render_host': '127.0.0.1',
+        'render_port': 50007
+    }
+    
+    if action_type == 'discrete':
+        defaults.update({
+            'aggregate_step_size': 50,
+            'battery_step_size': Decimal("0.05")
+        })
+
+    return defaults
+
 
 
 def create_environment_with_defaults(action_type: str, smart_meter_data_loader, h_network_rl_module, mode, log_folder, **overrides):
@@ -434,15 +463,7 @@ def create_environment_with_defaults(action_type: str, smart_meter_data_loader, 
         ...                                       reward_lambda=0.3)
     """
     action_type = _validate_action_type(action_type)
-    
-    # Define default configuration (only for optional parameters)
-    defaults = {
-        'rb_config': None,
-        'reward_lambda': 0.5,
-        'render_mode': None,
-        'render_host': '127.0.0.1',
-        'render_port': 50007
-    }
+    defaults = _get_environment_defaults(action_type)
     
     # Apply overrides to defaults
     config = {**defaults, **overrides}

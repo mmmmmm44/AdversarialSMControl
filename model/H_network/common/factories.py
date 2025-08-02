@@ -30,7 +30,7 @@ def create_h_network_module(action_type: str, h_network_type, device: str,
     """
     if action_type == 'continuous':
         from ..continuous.h_network_module import HNetworkRLModule
-        return HNetworkRLModule(h_network_type, device, optimizer_class, optimizer_kwargs)
+        return HNetworkRLModule(h_network_type, device, optimizer_class, optimizer_kwargs, **kwargs)
     elif action_type == 'discrete':
         from ..discrete.h_network_module import HNetworkDiscreteRLModule
         return HNetworkDiscreteRLModule(h_network_type, device, optimizer_class, optimizer_kwargs, **kwargs)
@@ -84,7 +84,7 @@ def _get_h_network_defaults(action_type: str) -> Dict[str, Any]:
         return {
             'h_network_type': HNetworkType.H_NETWORK,
             'device': 'cpu',
-            'output_dim': 101
+            'output_dim': 101       # example default for discrete observation space
         }
     else:
         raise ValueError(f"Unsupported action type: {action_type}. Must be 'continuous' or 'discrete'.")

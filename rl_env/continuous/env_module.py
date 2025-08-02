@@ -6,6 +6,7 @@ extending the base environment with continuous-specific functionality.
 """
 
 from datetime import datetime, timezone
+from decimal import Decimal
 import numpy as np
 import gymnasium as gym
 import pandas as pd
@@ -28,6 +29,7 @@ class SmartMeterContinuousEnv(SmartMeterEnvironmentBase):
 
     def _init_environment_specifics(self, rb_config: Optional[dict]):
         """Initialize continuous-specific components."""
+
         # Create episode using factory
         self.episode = EpisodeFactory.create(
             'continuous', 
@@ -117,6 +119,9 @@ class SmartMeterContinuousEnv(SmartMeterEnvironmentBase):
             raise ValueError(f"Invalid episode index: {episode_idx}. Must be between 0 and {self.smart_meter_data_loader.get_divided_segments_length() - 1}.")
 
         # Use curriculum sampling if no specific episode is requested
+        # TODO
+        # note that if using vectorized environments, the self.training_timestep should NOT be shared across environments
+        # Hence, the last reference training timestep (when an env ends) should be set by a callback (i.e. we need to implement a custom callback for this)
         if episode_idx is None:
             self.selected_idx = self.smart_meter_data_loader.sample_episode_index(self.np_random, self.training_timestep)
         else:
@@ -230,7 +235,7 @@ class SmartMeterContinuousEnv(SmartMeterEnvironmentBase):
         self.episode.df.iat[current_step, self.episode.df.columns.get_loc('grid_load')] = z_t
         
         # --------------------
-        # reward function calculation
+        # reward component calculation
         # --------------------
 
         # For privacy signal, we need y_t+1 if available
@@ -251,28 +256,39 @@ class SmartMeterContinuousEnv(SmartMeterEnvironmentBase):
             y_t_plus_1=y_t_plus_1
         )
 
-        
-        # Calculate reward
-        reward = -(self.reward_lambda * g_signal + (1 - self.reward_lambda) * f_signal)
-        self.per_episode_rewards.append(reward)
+        # Compute battery difference signal
+        battery_difference_signal = self._ep_battery_difference_signal()
+
+        # --------------------
+        # compute reward & handle transition
+        # --------------------
 
         # Move to next step
         self.episode.set_current_step(current_step + 1)
 
-        # Increment training timestep for curriculum learning (only during training)
-        if self.mode.value == TrainingMode.TRAIN.value:
-            self.training_timestep += 1
-        
         # determine termination condition
         terminated = self.episode.get_current_step() >= self.episode.get_episode_length() - 1     # -1 because we want to stop before the last step to avoid index out of range
         truncated = False
         
-        # Get next observation if not terminated
+        # Calculate reward
+        reward = -(self.reward_lambda * g_signal + (1 - self.reward_lambda) * f_signal)
+
+        # ignore that, as we don't have time to test this
+        # reward -= battery_difference_signal if terminated else 0.0
+
+        # Increment training timestep for curriculum learning (only during training)
+        if self.mode.value == TrainingMode.TRAIN.value:
+            self.training_timestep += 1
+
+        
         next_obs = self._get_obs()
         next_info = self._get_info(
             obs=next_obs, power_kw=power_kw, power_charged_discharged=power_charged_discharged, reward=reward, f_signal=f_signal, g_signal=g_signal, f_signal_additional_info=f_signal_additional_info
         )
+
+        # logging per-step information of this episode
         self.episode_info_list.append(next_info)
+        self.per_episode_rewards.append(reward)
 
         # log the episode when terminated
         if terminated:
@@ -295,10 +311,10 @@ class SmartMeterContinuousEnv(SmartMeterEnvironmentBase):
             else:
                 self._save_episode_info_list(self.log_folder, self.selected_idx)
 
-            if self.mode.value == TrainingMode.TRAIN.value:
-                self._save_episode_df(self.log_folder, len(self.episodes_rewards))  # save the episode DataFrame, name the file based on the number of episodes trained so far
-            else:
-                self._save_episode_df(self.log_folder, self.selected_idx)       # name the file based on episode index (in the validation and test datasets)
+            # if self.mode.value == TrainingMode.TRAIN.value:
+            #     self._save_episode_df(self.log_folder, len(self.episodes_rewards))  # save the episode DataFrame, name the file based on the number of episodes trained so far
+            # else:
+            #     self._save_episode_df(self.log_folder, self.selected_idx)       # name the file based on episode index (in the validation and test datasets)
 
             print_log(f"[{self.__class__.__name__} {str(self.mode).capitalize()}] Episode finished. Sum of rewards: {episode_sum}. Mean of rewards: {episode_reward_stats['mean']}. Std of rewards: {episode_reward_stats['std']}")
         
@@ -359,3 +375,13 @@ class SmartMeterContinuousEnv(SmartMeterEnvironmentBase):
         # return cost incurred for the power used in the time period
         return SmartMeterEnvironmentBase._get_weighted_electricity_cost(s_t_datetime, s_t_plus_1_datetime) * abs(power_kw) \
             + SmartMeterEnvironmentBase._get_standing_charge_per_day() * ((s_t_plus_1_datetime - s_t_datetime).total_seconds() / (24 * 60 * 60))  # convert seconds to days
+
+    def _ep_battery_difference_signal(self):
+        """
+        Check if the battery level returns to the initial state after one episode.
+        This should encourage the agent to develop a charging-at-night and discharging-in-day strategy.
+        """
+        
+        final_soc = self.battery.get_normalized_state_of_charge()
+
+        return abs(final_soc - self.init_soc)

@@ -32,12 +32,48 @@ class SmartMeterDiscreteEnv(SmartMeterEnvironmentBase):
     The charging/discharging action is discretized.
     """
 
+    def __init__(self, smart_meter_data_loader, h_network_rl_module, mode, log_folder, 
+                 rb_config=None, aggregate_step_size=50, battery_step_size=Decimal("0.05"), 
+                 reward_lambda=0.5, render_mode=None, render_host='127.0.0.1', render_port=50007):
+        """
+        Initialize the discrete Smart Meter environment.
+        
+        Args:
+            aggregate_step_size: Step size for aggregate load quantization (default: 50W)
+            battery_step_size: Step size for battery action quantization (default: 0.05kW)
+            Other parameters are passed to the base class.
+        """
+        # Store step sizes for use in _init_environment_specifics
+        self.aggregate_step_size = aggregate_step_size
+        self.battery_step_size = battery_step_size
+        
+        # Call parent constructor with standard parameters
+        super().__init__(smart_meter_data_loader, h_network_rl_module, mode, log_folder,
+                        rb_config, reward_lambda, render_mode, render_host, render_port)
+
     def _init_environment_specifics(self, rb_config: Optional[dict]):
         """Initialize discrete-specific components."""
+
+        # type check on battery_step_size
+        if not isinstance(self.battery_step_size, Decimal):
+            raise TypeError("battery_step_size must be a Decimal type.")
+
+        # validate both aggregate_step_size and battery_step_size
+        if self.aggregate_step_size <= 0 or self.battery_step_size <= Decimal("0"):
+            raise ValueError("Both aggregate_step_size and battery_step_size must be positive values.")
+        
+
+        MAX_AGGREGATE_LOAD = 5000  # Maximum aggregate load in W
+        if MAX_AGGREGATE_LOAD % self.aggregate_step_size != 0:
+            raise ValueError(f"aggregate_step_size ({self.aggregate_step_size}W) must be a divisor of {MAX_AGGREGATE_LOAD}W")
+        if ((Decimal(MAX_AGGREGATE_LOAD / 1000)) % self.battery_step_size) != 0:
+            raise ValueError(f"battery_step_size ({self.battery_step_size}kW) must be a divisor of {MAX_AGGREGATE_LOAD / 1000}kW")
+
         # Create episode using factory
         self.episode = EpisodeFactory.create(
             'discrete', 
-            self.smart_meter_data_loader.get_aggregate_load_segment(self.selected_idx)
+            self.smart_meter_data_loader.get_aggregate_load_segment(self.selected_idx),
+            step_size=self.aggregate_step_size
         )
         
         # Battery configuration (using Decimal for discrete)
@@ -48,23 +84,27 @@ class SmartMeterDiscreteEnv(SmartMeterEnvironmentBase):
             'capacity': Decimal("8.0"),  # kWh
             'max_charging_rate': Decimal("4.0"),  # kW
             'efficiency': Decimal("1.0"),  # 100% efficiency
-            'init_soc': self.init_soc
+            'init_soc': self.init_soc,
+            'step_size': self.battery_step_size,  # kW
         }
         
         battery_config = {**default_battery_config, **(rb_config or {})}
         self.battery = BatteryFactory.create('discrete', **battery_config)
-        
-        # Define observation space
+
+        # Dynamic observation space based on aggregate_step_size
+        num_aggregate_bins = (MAX_AGGREGATE_LOAD // self.aggregate_step_size) + 1
         self.observation_space = gym.spaces.Dict({
-            "aggregate_logit": gym.spaces.Discrete(101),    # discretized aggregate load values [0, 100] -> [0, 5kW], 0.05kW per step (a total of 101 boxes)
+            "aggregate_logit": gym.spaces.Discrete(num_aggregate_bins),    # discretized aggregate load values [0, 100] -> [0, 5kW], 0.05kW per step (a total of 101 boxes)
             "battery_soc": gym.spaces.Box(low=0, high=1, shape=(1,), dtype=np.float32),       # normalized battery state of charge
              "timestamp_features": gym.spaces.Box(low=-0.5, high=0.5, shape=(3,), dtype=np.float32)  # Hour, Day of Week, Month
         })
 
         # The charging and discharging of the RB were performed with a step size of 0.05 kW.
         assert int(self.battery.max_charging_rate % Decimal("0.05")) == 0, "Max charging/discharging rate must be a multiple of the step size of charging/discharging action."
-        self.low_level_action_space = gym.spaces.Discrete(2 * int(int(self.battery.max_charging_rate * 1000) / int(0.05 * 1000)) + 1)
-        
+
+        num_battery_steps = int(self.battery.max_charging_rate / self.battery_step_size)
+        self.low_level_action_space = gym.spaces.Discrete(2 * int(num_battery_steps) + 1)
+
         # Set the main action space to be the same as low level action space
         self.action_space = self.low_level_action_space
 
@@ -188,7 +228,7 @@ class SmartMeterDiscreteEnv(SmartMeterEnvironmentBase):
         # note that the total number of quantized action is 2 * self.battery.max_charging_rate // 0.05 + 1
         # let self.battery.max_charging_rate // 0.05 be N
         # convert it from [0, 2N] to [-N, N], then to [-1, 1]
-        power_kw_normalized = Decimal(int(_action) - int(self.battery.max_charging_rate // Decimal(str(0.05)))) / Decimal(int(self.battery.max_charging_rate // Decimal(str(0.05))))
+        power_kw_normalized = Decimal(int(_action) - int(self.battery.max_charging_rate // self.battery_step_size)) / Decimal(int(self.battery.max_charging_rate // self.battery_step_size))
         
         # Get current and next datetime
         s_t_datetime = self.episode.df.iloc[current_step]['datetime']
@@ -212,7 +252,7 @@ class SmartMeterDiscreteEnv(SmartMeterEnvironmentBase):
         # --------------------
         
         # Calculate grid load
-        z_t = Decimal(int(y_t)) + power_charged_discharged  # if we are charging the battery, the grid load should be higher
+        z_t = Decimal(int(y_t)) + power_charged_discharged * 1000 # if we are charging the battery, the grid load should be higher
         
         # then round it to nearest step size
         z_t = int(z_t / self.battery.step_size) * self.battery.step_size
@@ -221,7 +261,7 @@ class SmartMeterDiscreteEnv(SmartMeterEnvironmentBase):
         self.episode.df.iat[current_step, self.episode.df.columns.get_loc('grid_load')] = float(z_t)  # update the grid load in the dataframe
         
         # --------------------
-        # reward function calculation
+        # reward component calculation
         # --------------------
         
         # For privacy signal, we need y_t+1 if available
@@ -241,27 +281,41 @@ class SmartMeterDiscreteEnv(SmartMeterEnvironmentBase):
             z_t=int(z_t),
             y_t_plus_1=y_t_plus_1
         )
-        
-        # Calculate reward
-        reward = -(self.reward_lambda * g_signal + (1 - self.reward_lambda) * f_signal)
-        self.per_episode_rewards.append(reward)
-        
+
+        # Compute battery difference signal
+        battery_difference_signal = self._ep_battery_difference_signal()
+
+        # --------------------
+        # compute reward & handle transition
+        # --------------------
+
         # Move to next step
         self.episode.set_current_step(current_step + 1)
+        
+        # Check if episode is done
+        terminated = self.episode.get_current_step() >= self.episode.get_episode_length() - 1
+        truncated = False
+
+        # Calculate reward
+        reward = -(self.reward_lambda * g_signal + (1 - self.reward_lambda) * f_signal)
+
+        # ignore that, as we don't have time to test this
+        # reward -= battery_difference_signal if terminated else 0.0
+
 
         # Increment training timestep for curriculum learning (only during training)
         if self.mode.value == TrainingMode.TRAIN.value:
             self.training_timestep += 1
 
-        # Check if episode is done
-        terminated = self.episode.get_current_step() >= self.episode.get_episode_length() - 1
-        truncated = False
         
         next_obs = self._get_obs()
         next_info = self._get_info(
             obs=next_obs, power_kw=power_kw, power_charged_discharged=power_charged_discharged, reward=reward, f_signal=f_signal, g_signal=g_signal, f_signal_additional_info=f_signal_additional_info
         )
+
+        # logging per-step information of this episode
         self.episode_info_list.append(next_info)
+        self.per_episode_rewards.append(reward)
 
         # log the episode when terminated
         if terminated:
@@ -284,17 +338,17 @@ class SmartMeterDiscreteEnv(SmartMeterEnvironmentBase):
             else:
                 self._save_episode_info_list(self.log_folder, self.selected_idx)
 
-            if self.mode.value == TrainingMode.TRAIN.value:
-                self._save_episode_df(self.log_folder, len(self.episodes_rewards))  # save the episode DataFrame, name the file based on the number of episodes trained so far
-            else:
-                self._save_episode_df(self.log_folder, self.selected_idx)       # name the file based on episode index (in the validation and test datasets)
+            # if self.mode.value == TrainingMode.TRAIN.value:
+            #     self._save_episode_df(self.log_folder, len(self.episodes_rewards))  # save the episode DataFrame, name the file based on the number of episodes trained so far
+            # else:
+            #     self._save_episode_df(self.log_folder, self.selected_idx)       # name the file based on episode index (in the validation and test datasets)
 
             print_log(f"[{self.__class__.__name__} {str(self.mode).capitalize()}] Episode finished. Sum of rewards: {episode_sum}. Mean of rewards: {episode_reward_stats['mean']}. Std of rewards: {episode_reward_stats['std']}")
 
         return next_obs, \
             reward, \
             terminated, \
-            False, \
+            truncated, \
             next_info
 
     def _f_signal(self, y_t: int, z_t: int, y_t_plus_1: int) -> float:
@@ -353,3 +407,13 @@ class SmartMeterDiscreteEnv(SmartMeterEnvironmentBase):
         return SmartMeterEnvironmentBase._get_weighted_electricity_cost(s_t_datetime, s_t_plus_1_datetime) * abs(float(power_kw)) \
             + SmartMeterEnvironmentBase._get_standing_charge_per_day() * ((s_t_plus_1_datetime - s_t_datetime).total_seconds() / (24 * 60 * 60))  # convert seconds to days
         
+
+    def _ep_battery_difference_signal(self):
+        """
+        Check if the battery level returns to the initial state after one episode.
+        This should encourage the agent to develop a charging-at-night and discharging-in-day strategy.
+        """
+        
+        final_soc = self.battery.get_normalized_state_of_charge()
+
+        return abs(final_soc - float(self.init_soc))

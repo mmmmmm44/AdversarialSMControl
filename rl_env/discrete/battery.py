@@ -41,8 +41,10 @@ class RechargeableBatteryDiscrete(RechargeableBatteryBase):
         """Initial validation for step_size before parent init."""
         if isinstance(value, Decimal):
             return value
-        elif isinstance(value, (int, float, str)):
+        elif isinstance(value, (int, str)):
             return Decimal(str(value))
+        elif isinstance(value, float):
+            raise TypeError("Using float is discouraged for discrete action spaces due to precision issues. Use Decimal instead.")
         else:
             raise TypeError(f"Expected numeric type for discrete battery, got {type(value)}")
     
@@ -61,8 +63,10 @@ class RechargeableBatteryDiscrete(RechargeableBatteryBase):
         """
         if isinstance(value, Decimal):
             return value
-        elif isinstance(value, (int, float, str)):
+        elif isinstance(value, (int, str)):
             return Decimal(str(value))
+        elif isinstance(value, float):
+            raise TypeError("Using float is discouraged for discrete action spaces due to precision issues. Use Decimal instead.")
         else:
             raise TypeError(f"Expected numeric type for discrete battery, got {type(value)}")
     

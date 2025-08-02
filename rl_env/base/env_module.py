@@ -5,6 +5,7 @@ This module defines the common interface and shared functionality for different
 types of Smart Meter RL environments used in the project.
 """
 
+from decimal import Decimal
 import numpy as np
 import gymnasium as gym
 import pandas as pd
@@ -19,6 +20,7 @@ from model.H_network.base.h_network_module import HNetworkRLModuleBase
 from rl_env.training_mode import TrainingMode
 from rl_env.render_window import RenderWindowControl, RenderWindowMessageType
 from rl_env.data_loader import BaseSmartMeterDataLoader
+from rl_env.tariff import TIME_OF_USE_PRICES, STANDING_CHARGE
 from utils import print_log
 
 
@@ -165,10 +167,6 @@ class SmartMeterEnvironmentBase(gym.Env, ABC):
         Returns:
             Dictionary mapping time intervals to prices in GBP per kWh.
         """
-        TIME_OF_USE_PRICES = {
-            (time(0,0,0,0), time(7,0,0,0)): 0.1317,              # off-peak price
-            (time(7,0,0,0), time(23,59,59,999999)): 0.3075,      # peak price
-        }
         return TIME_OF_USE_PRICES
 
     @staticmethod
@@ -179,7 +177,7 @@ class SmartMeterEnvironmentBase(gym.Env, ABC):
         Returns:
             Standing charge per day.
         """
-        return 0.4734  # in GBP
+        return STANDING_CHARGE
 
     def _get_weighted_electricity_cost(s_t_datetime: datetime, s_t_plus_1_datetime: datetime) -> float:
         """
@@ -488,6 +486,8 @@ class SmartMeterEnvFactory:
                 - render_mode: Render mode (optional)
                 - render_host: Render server host
                 - render_port: Render server port
+                - aggregate_step_size: Step size for aggregate load quantization (discrete only)
+                - battery_step_size: Step size for battery action quantization (discrete only)
                 
         Returns:
             Environment instance appropriate for the action type.
@@ -497,7 +497,10 @@ class SmartMeterEnvFactory:
         """
         if action_type.lower() == 'continuous':
             from rl_env.continuous.env_module import SmartMeterContinuousEnv
-            return SmartMeterContinuousEnv(**kwargs)
+            # Filter out discrete-specific parameters for continuous environment
+            continuous_kwargs = {k: v for k, v in kwargs.items() 
+                               if k not in ['aggregate_step_size', 'battery_step_size']}
+            return SmartMeterContinuousEnv(**continuous_kwargs)
         elif action_type.lower() == 'discrete':
             from rl_env.discrete.env_module import SmartMeterDiscreteEnv
             return SmartMeterDiscreteEnv(**kwargs)

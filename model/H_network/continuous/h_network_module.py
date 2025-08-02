@@ -26,7 +26,7 @@ class HNetworkRLModule(HNetworkRLModuleBase):
     both H_NETWORK and H_NETWORK2 architectures.
     """
     
-    def __init__(self, h_network_type: HNetworkType, device: str, optimizer_class=None, optimizer_kwargs=None):
+    def __init__(self, h_network_type: HNetworkType, device: str, optimizer_class=None, optimizer_kwargs=None, **kwargs):
         """
         Initialize the continuous H-Network RL module.
         
@@ -35,6 +35,7 @@ class HNetworkRLModule(HNetworkRLModuleBase):
             device: Device to run on ('cpu' or 'cuda')
             optimizer_class: Optimizer class (default: torch.optim.Adam)
             optimizer_kwargs: Dict of optimizer arguments (default: {'lr': 1e-3})
+            **kwargs: Additional arguments (e.g., output_dim for discrete)
         """
         super().__init__(h_network_type, device, optimizer_class, optimizer_kwargs)
     
