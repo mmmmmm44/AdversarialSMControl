@@ -7,7 +7,6 @@ from pathlib import Path
 from datetime import datetime
 import sys
 import argparse
-import json
 
 sys.path.insert(0, str(Path(__file__).parent))
 REPO_DIR = Path(__file__).parent
@@ -18,12 +17,11 @@ from utils_logging import save_experiment_details
 from rl_env.data_loader import SimpleSmartMeterDataLoader
 from rl_env.training_mode import TrainingMode
 from rl_env.base.env_module import SmartMeterEnvFactory
-from rl_env.env_callbacks import TrainHNetworkEveryNEpisodes, SaveCheckpointEveryNEpisodes, ValidateEveryNEpisodes
+from rl_env.env_callbacks import TrainHNetworkEveryNEpisodes, SaveCheckpointEveryNEpisodes, ValidateEveryNEpisodes, UpdateGlobalTimestepCallback, EnvLoggingCallback
 
 from model.H_network.common.factories import create_h_network_module_with_defaults
 from model.H_network.h_network_arch import HNetworkType
 
-from stable_baselines3 import PPO
 from model.DDQN.ddqn import DoubleDQN
 from stable_baselines3.common.logger import configure
 
@@ -177,6 +175,8 @@ def main(training_kwargs: dict):
         progress_bar=False,
         tb_log_name="PPO_SmartMeterWorldContinuous",
         callback=[
+            UpdateGlobalTimestepCallback(),
+            EnvLoggingCallback(log_folder=experiment_folder / "logs_train"),
             TrainHNetworkEveryNEpisodes(every_n_episodes=every_n_episodes, h_network_rl_module=h_network_rl_module),
             SaveCheckpointEveryNEpisodes(every_n_episodes=every_n_episodes, h_network_rl_module=h_network_rl_module, save_folder=experiment_folder / "checkpoints"),
             ValidateEveryNEpisodes(every_n_episodes=every_n_episodes * 5, sweep_every_n_episodes=sweep_every_n_episodes, validation_log_folder=experiment_folder / "logs_validation", validation_env=env_validation, h_network_rl_module=h_network_rl_module, best_model_save_path=experiment_folder / "best_model")
