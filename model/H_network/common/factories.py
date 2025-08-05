@@ -122,9 +122,12 @@ def create_h_network_module_with_defaults(action_type: str, **overrides) -> Any:
     # Extract parameters for factory call
     h_network_type = params.pop('h_network_type')
     device = params.pop('device')
+    optimizer_class = params.pop('optimizer_class', None)
+    optimizer_kwargs = params.pop('optimizer_kwargs', None)
+
     
     # Delegate to create_h_network_module
-    return create_h_network_module(action_type, h_network_type, device, **params)
+    return create_h_network_module(action_type, h_network_type, device, optimizer_class=optimizer_class, optimizer_kwargs=optimizer_kwargs, **params)
 
 
 def load_h_network_module_from_checkpoint(action_type: str, h_network_type: HNetworkType, 
