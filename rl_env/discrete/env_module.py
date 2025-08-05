@@ -32,7 +32,7 @@ class SmartMeterDiscreteEnv(SmartMeterEnvironmentBase):
     The charging/discharging action is discretized.
     """
 
-    def __init__(self, smart_meter_data_loader, h_network_rl_module, mode, log_folder, 
+    def __init__(self, smart_meter_data_loader, h_network_rl_module, mode, 
                  rb_config=None, aggregate_step_size=50, battery_step_size=Decimal("0.05"), 
                  reward_lambda=0.5, render_mode=None, render_host='127.0.0.1', render_port=50007):
         """
@@ -48,7 +48,7 @@ class SmartMeterDiscreteEnv(SmartMeterEnvironmentBase):
         self.battery_step_size = battery_step_size
         
         # Call parent constructor with standard parameters
-        super().__init__(smart_meter_data_loader, h_network_rl_module, mode, log_folder,
+        super().__init__(smart_meter_data_loader, h_network_rl_module, mode,
                         rb_config, reward_lambda, render_mode, render_host, render_port)
 
     def _init_environment_specifics(self, rb_config: Optional[dict]):
@@ -301,12 +301,6 @@ class SmartMeterDiscreteEnv(SmartMeterEnvironmentBase):
 
         # ignore that, as we don't have time to test this
         # reward -= battery_difference_signal if terminated else 0.0
-
-
-        # Increment training timestep for curriculum learning (only during training)
-        if self.mode.value == TrainingMode.TRAIN.value:
-            self.training_timestep += 1
-
         
         next_obs = self._get_obs()
         next_info = self._get_info(
@@ -315,35 +309,58 @@ class SmartMeterDiscreteEnv(SmartMeterEnvironmentBase):
 
         # logging per-step information of this episode
         self.episode_info_list.append(next_info)
-        self.per_episode_rewards.append(reward)
+        self.per_episode_rewards.append({
+            "reward": float(reward),
+            "f_signal": float(f_signal),
+            "g_signal": float(g_signal),
+        })
 
         # log the episode when terminated
         if terminated:
             # push the old episode to the HNetworkRLModule buffer when only in training mode
+            # concurrency is not an issue here, as for DummyVecEnv, step() is called sequentially
             if self.mode.value == TrainingMode.TRAIN.value:
                 self.h_network_rl_module.push_to_replay_buffer(self.episode)
 
             # calculate the sum of rewards for the episode
-            episode_sum = math.fsum(self.per_episode_rewards)
+            episode_sum = math.fsum([item["reward"] for item in self.per_episode_rewards])
             episode_reward_stats = {
-                "sum": float(episode_sum),
-                "mean": float(np.mean(self.per_episode_rewards)),
-                "std": float(np.std(self.per_episode_rewards))
+                "reward_sum": float(episode_sum),
+                "reward_mean": float(np.mean([item["reward"] for item in self.per_episode_rewards])),
+                "reward_std": float(np.std([item["reward"] for item in self.per_episode_rewards])),
+                "f_signal_sum": float(np.sum([item["f_signal"] for item in self.per_episode_rewards])),
+                "f_signal_mean": float(np.mean([item["f_signal"] for item in self.per_episode_rewards])),
+                "f_signal_std": float(np.std([item["f_signal"] for item in self.per_episode_rewards])),
+                "g_signal_sum": float(np.sum([item["g_signal"] for item in self.per_episode_rewards])),
+                "g_signal_mean": float(np.mean([item["g_signal"] for item in self.per_episode_rewards])),
+                "g_signal_std": float(np.std([item["g_signal"] for item in self.per_episode_rewards])),
             }
-            self.episodes_rewards.append(episode_reward_stats)
+            self.prev_episode_reward_stats = episode_reward_stats  # store the previous episode reward stats for logging
+            
+
             self.per_episode_rewards = []  # reset the per-episode rewards for the next episode
 
-            if self.mode.value == TrainingMode.TRAIN.value:
-                self._save_episode_info_list(self.log_folder, len(self.episodes_rewards))
-            else:
-                self._save_episode_info_list(self.log_folder, self.selected_idx)
+            # get the episode info with metadata
+            # this will be handled by the callback
+            self.prev_episode_info_with_metadata = self._get_episode_info(self.episode_info_list)
+
+            # Leave all the saving logic to the callback, for synchronization with number of episodes
+            # when we create a DummyVecEnv with n_envs > 1
+
+            # if self.mode.value == TrainingMode.TRAIN.value:
+            #     self._save_prev_episode_info_list(self.log_folder, len(self.episodes_rewards))
+            # else:
+            #     self._save_prev_episode_info_list(self.log_folder, self.selected_idx)
 
             # if self.mode.value == TrainingMode.TRAIN.value:
             #     self._save_episode_df(self.log_folder, len(self.episodes_rewards))  # save the episode DataFrame, name the file based on the number of episodes trained so far
             # else:
             #     self._save_episode_df(self.log_folder, self.selected_idx)       # name the file based on episode index (in the validation and test datasets)
 
-            print_log(f"[{self.__class__.__name__} {str(self.mode).capitalize()}] Episode finished. Sum of rewards: {episode_sum}. Mean of rewards: {episode_reward_stats['mean']}. Std of rewards: {episode_reward_stats['std']}")
+            print_log(f"[{self.__class__.__name__} {str(self.mode).capitalize()}] Episode finished. Sum of rewards: {episode_sum}. Mean of rewards: {episode_reward_stats['reward_mean']}. Std of rewards: {episode_reward_stats['reward_std']}")
+            print_log(f"[{self.__class__.__name__} {str(self.mode).capitalize()}] Episode f_signal sum: {episode_reward_stats['f_signal_sum']}. Mean: {episode_reward_stats['f_signal_mean']}. Std: {episode_reward_stats['f_signal_std']}")
+            print_log(f"[{self.__class__.__name__} {str(self.mode).capitalize()}] Episode g_signal sum: {episode_reward_stats['g_signal_sum']}. Mean: {episode_reward_stats['g_signal_mean']}. Std: {episode_reward_stats['g_signal_std']}")
+
 
         return next_obs, \
             reward, \

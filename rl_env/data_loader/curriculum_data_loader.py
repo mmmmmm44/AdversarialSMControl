@@ -77,6 +77,11 @@ class CurriculumSmartMeterDataLoader(BaseSmartMeterDataLoader):
             Dictionary mapping episode length (in days) to sampling probability
         """
         # Define curriculum phases (in timesteps)
+        # note that these values will be on effect after an episode.
+        # due to the .step() -> .reset() -> env calling sample_episode_index() -> UpdateGlobalTimestep() -> update env internal sekf.training_timestep()
+        # hence an immediate sampling beyond the phrase boundary will not occur
+        # a suggested curriculum scheduling is to set phrase_n = your_targetted_timesteps - an epiosode length
+        # e.g. if you want to start sampling 2-day episodes after 100k steps, set phase_1 = 100000 - 24 * 60 (1 min sampling)
         phase_1 = 100000   # First 100k steps: only 1-day episodes
         phase_2 = 300000   # Next 200k steps: introduce 2-day episodes
         phase_3 = 600000   # Next 300k steps: introduce 3-day episodes

@@ -35,7 +35,7 @@ class SmartMeterEnvironmentBase(gym.Env, ABC):
 
     metadata = {"render_modes": ["human"]}
 
-    def __init__(self, smart_meter_data_loader: BaseSmartMeterDataLoader, h_network_rl_module: HNetworkRLModuleBase, mode: TrainingMode, log_folder: Path, rb_config: Optional[dict] = None, reward_lambda: float = 0.5, render_mode=None, render_host='127.0.0.1', render_port=50007):
+    def __init__(self, smart_meter_data_loader: BaseSmartMeterDataLoader, h_network_rl_module: HNetworkRLModuleBase, mode: TrainingMode, rb_config: Optional[dict] = None, reward_lambda: float = 0.5, render_mode=None, render_host='127.0.0.1', render_port=50007):
         '''
         Initializes the SmartMeterEnvironmentBase.
         
@@ -43,7 +43,6 @@ class SmartMeterEnvironmentBase(gym.Env, ABC):
             smart_meter_data_loader (BaseSmartMeterDataLoader): Data loader for smart meter data (supports both simple and curriculum loaders).
             h_network_rl_module: H-network RL module for providing per-step privacy-related signals.
             mode (TrainingMode): The mode of the environment (train, validate, test).
-            log_folder (Path): Folder to save logs and results.
             rb_config (Optional[dict]): Configuration for the rechargeable battery. If None, default values are used.
             reward_lambda (float): Weighting factor for the reward function, between 0 and 1.
             render_mode (Optional[str]): Render mode for visualization. If 'human', it connects to a render server.
@@ -85,10 +84,6 @@ class SmartMeterEnvironmentBase(gym.Env, ABC):
         # H-network inference buffer for episode
         self.h_network_episode_inference_buffer = []
         
-        # Create log folder if it doesn't exist
-        self.log_folder = log_folder
-        if not self.log_folder.exists():
-            self.log_folder.mkdir(parents=True)
         
         # Episode data tracking
         self.episodes_rewards = []
@@ -305,7 +300,6 @@ class SmartMeterEnvironmentBase(gym.Env, ABC):
     def set_training_timestep(self, timestep: int):
         """Set the current training timestep."""
         self.training_timestep = timestep
-        print_log(f"[{self.__class__.__name__} {str(self.mode).capitalize()}] Training timestep set to {timestep}")
 
 
     # --------------------
@@ -325,16 +319,6 @@ class SmartMeterEnvironmentBase(gym.Env, ABC):
     # Functions for saving log data / episode data / episode info etc.
     # --------------------
 
-    def set_log_folder(self, log_folder: Path):
-        """Set the log folder for this environment."""
-        self.log_folder = log_folder
-        
-        # Create log folder if it doesn't exist
-        if not self.log_folder.exists():
-            self.log_folder.mkdir(parents=True)
-        
-        print_log(f"[{self.__class__.__name__} {str(self.mode).capitalize()}] Log folder set to {self.log_folder}")
-
     def _save_episode_df(self, log_folder: Path, episode_idx: int):
         """
         Save the episode DataFrame to a pickle file.
@@ -353,9 +337,68 @@ class SmartMeterEnvironmentBase(gym.Env, ABC):
 
         print_log(f"[{self.__class__.__name__} {str(self.mode).capitalize()}] Episode {episode_idx:0>4} DataFrame saved to {episode_df_path}")
 
-    def _save_episode_info_list(self, log_folder: Path, episode_idx: int):
+    def _get_episode_info(self, episode_info_list: list) -> Dict:
+        """
+        Get the information of the episode with enhanced metadata.
+        This is intended to be called at last .step() of an episode. Then the dict will be saved by _save_prev_episode_info() which will be called in a callback.
+        
+        This method collects the episode information and enhances it with metadata for better identification.
+        The metadata includes:
+            - episode_training_idx: Training sequence number
+            - episode_data_idx: Index in data loader
+            - episode_content_id: Content-based unique identifier
+            - episode_length_days: Episode length in days
+            - training_timestep: Current training timestep
+            - dataset_type: train/validate/test
+            - curriculum_info: Curriculum information
+            - timestamp_created: Timestamp of creation
+
+        Args:
+            episode_info_list (list): List of dictionaries containing episode information.
+
+        Returns:
+            Dict: The information of the previous episode.
+        """
+
+        # Get episode metadata for identification
+        # episode_metadata = self.smart_meter_data_loader.get_episode_metadata(self.selected_idx)
+
+        # Get episode content information from the episode DataFrame
+        episode_content_id = None
+        episode_length_days = None
+        if hasattr(self.episode, 'df') and not self.episode.df.empty:
+            if 'episode_content_id' in self.episode.df.columns:
+                episode_content_id = self.episode.df['episode_content_id'].iloc[0]
+            if 'episode_length_days' in self.episode.df.columns:
+                episode_length_days = self.episode.df['episode_length_days'].iloc[0]
+
+        # Enhanced episode metadata
+        enhanced_metadata = {
+            # "episode_training_idx": int(self.episode_idx),  # Training sequence number
+            "episode_data_idx": int(self.selected_idx),  # Index in data loader
+            "episode_content_id": episode_content_id,  # Content-based unique identifier
+            "episode_length_days": int(episode_length_days),  # Episode length in days
+            "training_timestep": int(self.training_timestep),  # Current training timestep, which will be n_steps * n_envs (same as sb3 documentation)
+            "dataset_type": str(self.mode.value),  # train/validate/test
+            "curriculum_info": self.curriculum_info,  # Curriculum information
+            "timestamp_created": datetime.now().isoformat()
+        }
+
+        # Save episode with enhanced metadata
+        episode_info_with_metadata = {
+            "metadata": enhanced_metadata,
+            "episode_data": episode_info_list
+        }
+
+        return episode_info_with_metadata
+
+    def save_episode_info(self, log_folder: Path, episode_training_idx: int):
         """
         Save the infos of the whole episode to a json file with enhanced episode identification.
+
+        This method is intended to be called at a callback, in which the env is already being called .reset()
+        Or called after the last .step() of an episode.
+
         Args:
             log_folder (Path): The folder to save the episode info.
             episode_idx (int): The index of the episode to save.
@@ -365,48 +408,27 @@ class SmartMeterEnvironmentBase(gym.Env, ABC):
         if not target_folder.exists():
             target_folder.mkdir(parents=True)
 
-        # Get episode metadata for identification
-        # episode_metadata = self.smart_meter_data_loader.get_episode_metadata(self.selected_idx)
-        
-        # Get episode content information from the episode DataFrame
-        episode_content_id = None
-        episode_length_days = None
-        if hasattr(self.episode, 'df') and not self.episode.df.empty:
-            if 'episode_content_id' in self.episode.df.columns:
-                episode_content_id = self.episode.df['episode_content_id'].iloc[0]
-            if 'episode_length_days' in self.episode.df.columns:
-                episode_length_days = self.episode.df['episode_length_days'].iloc[0]
-        
-        # Enhanced episode metadata
-        enhanced_metadata = {
-            "episode_training_idx": int(episode_idx),  # Training sequence number
-            "episode_data_idx": int(self.selected_idx),  # Index in data loader
-            "episode_content_id": episode_content_id,  # Content-based unique identifier
-            "episode_length_days": int(episode_length_days),  # Episode length in days
-            "training_timestep": int(self.training_timestep),  # Current training timestep
-            "dataset_type": str(self.mode.value),  # train/validate/test
-            "curriculum_info": self.curriculum_info,  # Curriculum information
-            "timestamp_created": datetime.now().isoformat()
-        }
-        
-        # Save episode with enhanced metadata
-        episode_info_with_metadata = {
-            "metadata": enhanced_metadata,
-            "episode_data": self.episode_info_list
-        }
+        episode_info_list_path = target_folder / f"episode_{episode_training_idx:0>4}_info.json"
 
-        episode_info_list_path = target_folder / f"episode_{episode_idx:0>4}_info.json"
+        # Determine the episode training index based on the calling from the callback
+        self.prev_episode_info_with_metadata['metadata']['episode_training_idx'] = episode_training_idx
+
+        # handle the case in which the last element of the episode_info_list contains a "terminal_observation"
+        # we remove the "terminal_observation" key from the last element
+        if self.prev_episode_info_with_metadata['episode_data'] and isinstance(self.prev_episode_info_with_metadata['episode_data'][-1], dict) and 'terminal_observation' in self.prev_episode_info_with_metadata['episode_data'][-1]:
+            self.prev_episode_info_with_metadata['episode_data'][-1].pop('terminal_observation')
 
         with open(episode_info_list_path, "w") as f:
-            json.dump(episode_info_with_metadata, f, indent=4)
+            json.dump(self.prev_episode_info_with_metadata, f, indent=4)
 
-        print_log(f"[{self.__class__.__name__} {str(self.mode).capitalize()}] Episode {episode_idx:0>4} info saved to {episode_info_list_path}")
-        if episode_content_id:
-            print_log(f"[{self.__class__.__name__} {str(self.mode).capitalize()}] Episode content ID: {episode_content_id}, Length: {episode_length_days} day(s)")
+        print_log(f"[{self.__class__.__name__} {str(self.mode).capitalize()}] Episode {episode_training_idx:0>4} info saved to {episode_info_list_path}")
+        if self.prev_episode_info_with_metadata.get("episode_content_id"):
+            print_log(f"[{self.__class__.__name__} {str(self.mode).capitalize()}] Episode content ID: {self.prev_episode_info_with_metadata['episode_content_id']}, Length: {self.prev_episode_info_with_metadata['episode_length_days']} day(s)")
 
-    def save_episodes_rewards(self, folder_path: Path):
+    @staticmethod
+    def save_episodes_rewards(episodes_rewards: list[dict], folder_path: Path, mode: TrainingMode):
         """
-        Save the episodes rewards to a file.
+        Save the episodes rewards to a file. This is intended to be called at the end of a training session
         Args:
             folder_path (Path): The path to save the episodes rewards in JSON format.
         """
@@ -415,13 +437,13 @@ class SmartMeterEnvironmentBase(gym.Env, ABC):
         
         file_path = folder_path / "episodes_rewards.json"
         with open(file_path, "w") as f:
-            json.dump(self.episodes_rewards, f, indent=4)
-        print_log(f"[{self.__class__.__name__} {str(self.mode).capitalize()}] Episodes rewards saved to {file_path}")
+            json.dump(episodes_rewards, f, indent=4)
+        print_log(f"[{__class__.__name__} {str(mode).capitalize()}] Episodes rewards saved to {file_path}")
 
-    def save_environment_config(self, file_name: str = None):
+    def save_environment_config(self, file_folder: str = None):
         """Save environment configuration to a file."""
-        if file_name is None:
-            file_name = f"env_config_{self.mode.value}.json"
+        
+        file_name = f"env_config_{self.mode.value}.json"
         
         env_config = {
             "mode": self.mode.value,
@@ -437,7 +459,7 @@ class SmartMeterEnvironmentBase(gym.Env, ABC):
             "render_port": self.render_port
         }
         
-        env_config_path = self.log_folder / file_name
+        env_config_path = file_folder / file_name
         with open(env_config_path, 'w') as f:
             json.dump(env_config, f, indent=2)
         
@@ -446,11 +468,7 @@ class SmartMeterEnvironmentBase(gym.Env, ABC):
 
     def close(self):
         """Cleanup - shared functionality."""
-        # Save any remaining data
-        if hasattr(self, 'episodes_rewards') and self.episodes_rewards:
-            self.save_episodes_rewards()
     
-        
         # Close render connection
         if self.render_connected and self.render_client_socket:
             try:
