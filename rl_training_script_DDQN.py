@@ -16,7 +16,7 @@ from utils_data_split import load_dataset, round_and_clip
 from utils_logging import save_experiment_details
 from rl_env.data_loader import SimpleSmartMeterDataLoader
 from rl_env.training_mode import TrainingMode
-from rl_env.base.env_module import SmartMeterEnvFactory
+from rl_env.base.env_module import SmartMeterEnvFactory, SmartMeterEnvironmentBase
 from rl_env.env_callbacks import TrainHNetworkEveryNEpisodes, SaveCheckpointEveryNEpisodes, ValidateEveryNEpisodes, UpdateGlobalTimestepCallback, EnvLoggingCallback
 
 from model.H_network.common.factories import create_h_network_module_with_defaults
@@ -37,6 +37,7 @@ def main(training_kwargs: dict):
     n_episodes = training_kwargs.get("N_episodes", 600)  # total number of episodes to train
     aggregate_step_size = training_kwargs.get("aggregate_step_size", 50)  # default step size for aggregate load
     battery_step_size = training_kwargs.get("battery_step_size", Decimal("0.05"))  # default step size for battery charging action
+    seed = training_kwargs.get("seed", None)
 
     rl_datetime = datetime.now().strftime("%Y%m%d_%H%M%S")
     experiment_folder = Path(REPO_DIR) / "experiments" / (rl_datetime + "_action_" + action_type + "_reward_lambda_" + str(reward_lambda))
@@ -69,10 +70,20 @@ def main(training_kwargs: dict):
         registry_path=experiment_folder / "simple_episode_registry_validation.json"
     )
 
+    # --------------------
+    # H-network parameters
+    # --------------------
+
+    h_network_kwargs = {
+        "h_network_type": HNetworkType.H_NETWORK,
+        "optimizer_class": torch.optim.RMSprop,
+        "optimizer_kwargs": {"lr": 0.001},  # keep the same as the paper
+    }
+
     # create h-network module
     h_network_rl_module = create_h_network_module_with_defaults(
         action_type=action_type,
-        h_network_type=HNetworkType.H_NETWORK,
+        **h_network_kwargs,
         device=DEVICE
     )
 
@@ -81,9 +92,7 @@ def main(training_kwargs: dict):
         smart_meter_data_loader=sm_dl_train,
         h_network_rl_module=h_network_rl_module,
         mode=TrainingMode.TRAIN,
-        log_folder=experiment_folder / 'logs_train',
         reward_lambda=reward_lambda,
-        # render_mode="human",
         render_mode=None,
 
         # "continuous" action type does not require step size for battery charging and setting observation space size
@@ -97,9 +106,7 @@ def main(training_kwargs: dict):
         smart_meter_data_loader=sm_dl_validation,
         h_network_rl_module=h_network_rl_module,
         mode=TrainingMode.VALIDATE, 
-        log_folder=experiment_folder / 'logs_validation',
         reward_lambda=reward_lambda,
-        # render_mode="human",
         render_mode=None,
 
         aggregate_step_size=aggregate_step_size,
@@ -109,10 +116,10 @@ def main(training_kwargs: dict):
     h_network_rl_module.set_h_network(
         h_network_rl_module.initialize_h_network()
     )
-    h_network_rl_module.initialize_h_network_training()
+    # h_network_rl_module.initialize_h_network_training()
 
     # all logs (json files, tensorboard) of training will be saved in the specified foler
-    logger = configure(str(experiment_folder / "logs_train"), ["stdout", "json", "tensorboard"])
+    logger = configure(str(experiment_folder / "logs_tb"), ["stdout", "json", "tensorboard"])
 
     # --------------------
     # RL agent parameters
@@ -123,6 +130,9 @@ def main(training_kwargs: dict):
     rl_gamma = 1  # keep the same as the paper
     rl_train_freq = (120, "step")  # scaled to match with our episode length
     rl_target_update_interval = 7500  # scaled to match with our episode length
+    policy_kwargs = {
+        "optimizer_class": torch.optim.RMSprop,     # keep the same as the paper
+    }
 
     rl_model = DoubleDQN(
         "MultiInputPolicy",
@@ -133,7 +143,8 @@ def main(training_kwargs: dict):
         gamma=rl_gamma,                       # keep the same as the paper
         train_freq=rl_train_freq,            # scaled to match with our episode length
         target_update_interval=rl_target_update_interval,    # scaled to match with our episode length
-        # exploration_fraction= 150/600,  # scaled to match with our empirical observation
+        policy_kwargs=policy_kwargs,
+        seed=seed,
         verbose=2,
     )
     rl_model.set_logger(logger)
@@ -146,47 +157,74 @@ def main(training_kwargs: dict):
         "batch_size": rl_batch_size,
         "gamma": rl_gamma,
         "train_freq": rl_train_freq,
-        "target_update_interval": rl_target_update_interval
+        "target_update_interval": rl_target_update_interval,
+        "policy_kwargs": {
+            "optimizer_class": policy_kwargs["optimizer_class"].__name__,
+            # "optimizer_kwargs": policy_kwargs["optimizer_kwargs"]
+        }
     }
 
     experiment_details = {
         "action_type": action_type,
         "agent_type": "DoubleDQN",
-        "h_network_type": h_network_rl_module.h_network_type.name,
+        "h_network_parameters": {
+            "h_network_type": h_network_rl_module.h_network_type.name,
+            "optimizer_class": h_network_rl_module.optimizer_class.__name__,
+            "optimizer_kwargs": h_network_rl_module.optimizer_kwargs
+        },
         "reward_lambda": env_train.reward_lambda,
         "dataloader_type": sm_dl_train.__class__.__name__,
         "reward_lambda": reward_lambda,
         "training_n_episodes": n_episodes,
         'agent_parameters': agent_parameters,
+        'seed':seed
     }
     # additional details for discrete action type
     experiment_details = {**experiment_details, "aggregate_step_size": aggregate_step_size, "battery_step_size": float(battery_step_size)} if action_type == "discrete" else experiment_details
 
     # logging experiment details
     save_experiment_details(experiment_folder, experiment_details)
-    env_train.save_environment_config()
+    env_train.save_environment_config(file_folder=experiment_folder)
 
     # train
     every_n_episodes = 5
     sweep_every_n_episodes = 5 * 10  # every 50 episodes
 
+    env_logging_callback = EnvLoggingCallback(log_folder=experiment_folder / "logs_train")
+
+    eval_callback = ValidateEveryNEpisodes(
+        every_n_episodes=every_n_episodes * 5,
+        sweep_every_n_episodes=sweep_every_n_episodes,
+        validation_log_folder=experiment_folder / "logs_validation",
+        validation_env=env_validation,
+        h_network_rl_module=h_network_rl_module,
+        best_model_save_path=experiment_folder / "best_model",
+        seed=seed
+    )
+
+    # for reproducibility, necessary calls to reset the h_network (create a new instance) and the environment
+    h_network_rl_module.initialize_h_network_training()
+    # env_train.reset(seed=seed); env_train.action_space.seed(seed)  # seed the action space for reproducibility
+    env_validation.reset(seed=seed); env_validation.action_space.seed(seed)
+
     rl_model.learn(
         total_timesteps=24 * 60 * n_episodes,  # 600 episodes, each episode is 24 hours (with 1 min sample frequency)
         progress_bar=False,
-        tb_log_name="PPO_SmartMeterWorldContinuous",
+        tb_log_name="DDQL_SmartMeterWorldDiscrete",
         callback=[
             UpdateGlobalTimestepCallback(),
-            EnvLoggingCallback(log_folder=experiment_folder / "logs_train"),
+            env_logging_callback,
             TrainHNetworkEveryNEpisodes(every_n_episodes=every_n_episodes, h_network_rl_module=h_network_rl_module),
             SaveCheckpointEveryNEpisodes(every_n_episodes=every_n_episodes, h_network_rl_module=h_network_rl_module, save_folder=experiment_folder / "checkpoints"),
-            ValidateEveryNEpisodes(every_n_episodes=every_n_episodes * 5, sweep_every_n_episodes=sweep_every_n_episodes, validation_log_folder=experiment_folder / "logs_validation", validation_env=env_validation, h_network_rl_module=h_network_rl_module, best_model_save_path=experiment_folder / "best_model")
+            eval_callback
         ]
     )
 
     # save the training results
     print_log("Saving training results...")
 
-    env_train.save_episodes_rewards(experiment_folder / "logs_train")
+    SmartMeterEnvironmentBase.save_episodes_rewards(env_logging_callback.get_episode_rewards(), experiment_folder / "logs_train", TrainingMode.TRAIN)
+
     h_network_rl_module.save_train_loss_list(experiment_folder / "logs_train" / "h_network_train_loss_list.json")
 
     # save both RL model and H-network at the end of training
@@ -204,10 +242,10 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         "--action_type",
-        choices=["continuous", "discrete"],
-        required=True,
+        default="discrete",  # default to discrete action type
         help="Type of RL action space: 'continuous' (PPO) or 'discrete' (DoubleDQN)."
     )
+
     parser.add_argument(
         "--reward_lambda",
         type=float,
@@ -233,6 +271,13 @@ if __name__ == "__main__":
         help="Step size for discretizing the battery charging action (in kW)."
     )
 
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=None,
+        help="Random seed for reproducibility of environment episode sampling, RL agent, and H-network initialization. This will be used to seed the action space and the np_random in the environment for both training env and validation env. Also, while creating the rl_model, passing the seed to rl_model initialization will call stable_baselines3.common.utils.set_random_seed(seed) to set the random seed for python RNG, np.random.seed(seed), and torch.manual_seed(seed). (OS: this should greatly ensure the reproducibility, but not guaranteed, as torch.manual_seed(seed) does not guarantee the same results across different PyTorch versions or hardware/platform configurations.)"
+    )
+
     args = parser.parse_args()
 
     # Type and value checks
@@ -251,5 +296,6 @@ if __name__ == "__main__":
         "N_episodes": args.N_episodes,
         "aggregate_step_size": args.aggregate_step_size,
         "battery_step_size": Decimal(args.battery_step_size),
+        "seed": args.seed
     }
     main(training_kwargs)
