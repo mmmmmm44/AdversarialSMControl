@@ -218,7 +218,7 @@ def main(training_kwargs: dict, study:optuna.Study):
         })
 
         rl_model = PPO(
-            env=env_train_vec,
+            env=env_train_vec,      # this automatically calls env_train_vec.reset(), which resets every environment in the vectorized environment, and their action spaces.
             **kwargs
         )
 
@@ -307,7 +307,8 @@ def main(training_kwargs: dict, study:optuna.Study):
 
         # # save both RL model and H-network at the end of training
         rl_model_path = trial_folder / f"rl_model.zip"
-        h_network_path = trial_folder / f"h_network2.pth" if h_network_rl_module.h_network_type == HNetworkType.H_NETWORK2 else experiment_folder / f"h_network.pth"
+        h_network_path = trial_folder / f"h_network2.pth" if h_network_rl_module.h_network_type == HNetworkType.H_NETWORK2 \
+                        else trial_folder / f"h_network.pth"
 
         rl_model.save(rl_model_path)
         h_network_rl_module.save_h_network(h_network_path)
@@ -352,13 +353,14 @@ if __name__ == "__main__":
     }
 
     rl_datetime = datetime.now().strftime("%Y%m%d_%H%M%S")
-    # rl_datetime = datetime(2025, 8, 2, 15, 2, 51).strftime("%Y%m%d_%H%M%S")  # for testing purposes
+    # rl_datetime = datetime(2025, 8, 5, 6, 31, 46).strftime("%Y%m%d_%H%M%S")  # for re-run existing trial
     experiment_folder = Path(REPO_DIR) / "experiments" / (rl_datetime + "_action_" + training_kwargs["action_type"] + "_reward_lambda_" + str(training_kwargs["reward_lambda"]) + "_optuna")
-    experiment_folder.mkdir(parents=True, exist_ok=True)
+    if not experiment_folder.exists():
+        experiment_folder.mkdir(parents=True)
 
 
     sampler = TPESampler(n_startup_trials=N_STARTUP_TRIALS)
-    pruner = MedianPruner(n_startup_trials=N_STARTUP_TRIALS, n_warmup_steps= 24*60*10)      # at least 50 episodes before pruning
+    pruner = MedianPruner(n_startup_trials=N_STARTUP_TRIALS, n_warmup_steps= 24*60*50)      # at least 50 episodes before pruning
 
     storage = optuna.storages.RDBStorage(url=f"sqlite:///{experiment_folder}/optuna_results.db")
 
@@ -368,6 +370,7 @@ if __name__ == "__main__":
         pruner=pruner,
         direction="maximize",
         study_name="PPO_finetuning_study",
+        # load_if_exists=True,  # Load existing study if it exists
     )
 
     main(
