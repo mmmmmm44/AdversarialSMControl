@@ -120,16 +120,16 @@ def main(training_kwargs: dict):
     # --------------------
     # RL agent parameters
     # --------------------
-    rl_lr = 2.5e-4          # lets use the same learning rate as the paper
-    rl_batch_size=64       # same as the paper
-    n_updates_btw_h_network_training = 6
+    rl_lr = 7.3636e-3
+    rl_batch_size = 64
+    n_updates_btw_h_network_training = 2
     rl_gamma = 1            # same as the paper
     policy_kwargs = {
         "net_arch": [64, 64],               # same as the paper
         "activation_fn": torch.nn.ReLU,     # use ReLU instead of tanh (the default)
     }
-    n_epochs = 6
-    gae_lambda = 1 - 0.00555
+    n_epochs = 15
+    gae_lambda = 1 - 2.9011e-3
 
 
     # n_steps is automatically computed from n_updates_between_h_network_training
@@ -175,7 +175,7 @@ def main(training_kwargs: dict):
         "agent_type": "PPO",
         "h_network_type": h_network_rl_module.h_network_type.name,
         "dataloader_type": sm_dl_train.__class__.__name__,
-        "reward_lambda": reward_lambda,
+        "reward_lambda": env_train_vec.envs[0].env.reward_lambda,       # to get the true instance of the environment
         "training_n_episodes": n_episodes,
         'agent_parameters': convert_PPO_params_to_dict(agent_params),
         "seed": seed,
