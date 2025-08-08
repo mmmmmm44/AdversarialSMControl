@@ -174,7 +174,6 @@ def main(training_kwargs: dict):
         },
         "reward_lambda": env_train.reward_lambda,
         "dataloader_type": sm_dl_train.__class__.__name__,
-        "reward_lambda": reward_lambda,
         "training_n_episodes": n_episodes,
         'agent_parameters': agent_parameters,
         'seed':seed
