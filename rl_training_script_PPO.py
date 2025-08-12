@@ -81,7 +81,8 @@ def main(training_kwargs: dict):
     h_network_rl_module = create_h_network_module_with_defaults(
         action_type=action_type,
         h_network_type=HNetworkType.H_NETWORK,
-        device=DEVICE
+        device=DEVICE,
+        optimizer_kwargs={'lr': 0.0090116}
     )
 
     env_train_vec = make_vec_env(
@@ -174,6 +175,12 @@ def main(training_kwargs: dict):
         "action_type": action_type,
         "agent_type": "PPO",
         "h_network_type": h_network_rl_module.h_network_type.name,
+        "h_network_parameters": {
+            "optimizer": {
+                "type": h_network_rl_module.optimizer_class.__name__,
+                "training_kwargs": h_network_rl_module.optimizer_kwargs
+            }
+        },
         "dataloader_type": sm_dl_train.__class__.__name__,
         "reward_lambda": env_train_vec.envs[0].env.reward_lambda,       # to get the true instance of the environment
         "training_n_episodes": n_episodes,
