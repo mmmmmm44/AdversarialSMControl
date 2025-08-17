@@ -114,7 +114,7 @@ def main(training_kwargs: dict):
     )
 
     h_network_rl_module.set_h_network(
-        h_network_rl_module.initialize_h_network()
+        h_network_rl_module.initialize_h_network(output_dim=env_train.num_aggregate_bins)
     )
     # h_network_rl_module.initialize_h_network_training()
 
