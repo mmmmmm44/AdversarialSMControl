@@ -92,9 +92,9 @@ class SmartMeterDiscreteEnv(SmartMeterEnvironmentBase):
         self.battery = BatteryFactory.create('discrete', **battery_config)
 
         # Dynamic observation space based on aggregate_step_size
-        num_aggregate_bins = (MAX_AGGREGATE_LOAD // self.aggregate_step_size) + 1
+        self.num_aggregate_bins = (MAX_AGGREGATE_LOAD // self.aggregate_step_size) + 1      # this is used in initializing the H-network
         self.observation_space = gym.spaces.Dict({
-            "aggregate_logit": gym.spaces.Discrete(num_aggregate_bins),    # discretized aggregate load values [0, 100] -> [0, 5kW], 0.05kW per step (a total of 101 boxes)
+            "aggregate_load": gym.spaces.Box(low=-4, high=4, shape=(1,), dtype=np.float32),         # standardized discretized aggregate load
             "battery_soc": gym.spaces.Box(low=0, high=1, shape=(1,), dtype=np.float32),       # normalized battery state of charge
              "timestamp_features": gym.spaces.Box(low=-0.5, high=0.5, shape=(3,), dtype=np.float32)  # Hour, Day of Week, Month
         })
@@ -113,7 +113,7 @@ class SmartMeterDiscreteEnv(SmartMeterEnvironmentBase):
 
         current_step = self.episode.get_current_step()
 
-        current_load = self.episode.df.iloc[current_step]['aggregate_logit']
+        current_load = self.episode.df.iloc[current_step]['aggregate_std']
         soc = self.battery.get_normalized_state_of_charge()
         
         def _create_timestamp_features(timestamp: int) -> np.ndarray:
@@ -135,7 +135,7 @@ class SmartMeterDiscreteEnv(SmartMeterEnvironmentBase):
         timestamp_features = _create_timestamp_features(timestamp)
         
         return {
-            "aggregate_logit": np.int64(current_load),
+            "aggregate_load": np.array([current_load], dtype=np.float32),
             "battery_soc": np.array([soc], dtype=np.float32),
             "timestamp_features": timestamp_features
         }
@@ -167,7 +167,8 @@ class SmartMeterDiscreteEnv(SmartMeterEnvironmentBase):
         # Create new episode using factory
         self.episode = EpisodeFactory.create(
             'discrete',
-            self.smart_meter_data_loader.get_aggregate_load_segment(self.selected_idx)
+            self.smart_meter_data_loader.get_aggregate_load_segment(self.selected_idx),
+            step_size=self.aggregate_step_size
         )
         self.episode_info_list = []
 
@@ -255,7 +256,7 @@ class SmartMeterDiscreteEnv(SmartMeterEnvironmentBase):
         z_t = Decimal(int(y_t)) + power_charged_discharged * 1000 # if we are charging the battery, the grid load should be higher
         
         # then round it to nearest step size
-        z_t = int(z_t / self.battery.step_size) * self.battery.step_size
+        z_t = int(z_t / self.aggregate_step_size) * self.aggregate_step_size
         z_t = np.clip(z_t, 0, None)  # ensure z_t is non-negative
         
         self.episode.df.iat[current_step, self.episode.df.columns.get_loc('grid_load')] = float(z_t)  # update the grid load in the dataframe
@@ -277,9 +278,9 @@ class SmartMeterDiscreteEnv(SmartMeterEnvironmentBase):
         )
             
         f_signal, f_signal_additional_info = self._f_signal(
-            y_t=y_t,
-            z_t=int(z_t),
-            y_t_plus_1=y_t_plus_1
+            y_t=y_t,        # y_t is the (discretized) household load
+            z_t=int(z_t),       # z_t is the (discretized) grid load
+            y_t_plus_1=y_t_plus_1   # y_t_plus_1 is the logit on the discretized load, in range [0, 5000 // (step_size)]
         )
 
         # Compute battery difference signal
