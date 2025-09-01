@@ -1,13 +1,80 @@
-# UoM Dissertation project folder
+# Battery-Aided Load Shaping Strategies based on Reinforcement Learning for Optimal Privacy-Cost Trade-off in Smart Electricity Metering
 
-## Description
+## Abstract
 
-The project aims to improve the algorithm,DDQL-MI, presented in the paper "rivacy-Cost Management in Smart Meters With Mutual-Information-Based Reinforcement Learning" by introducing new assumptions to the derivation of the per-step privacy signal. This results in a continuous probability distribution learnt by the H-network in the paper, allows a RL algorithm to produce charging/discharging rate in a continuous action space, instead of a discrete action space. A custom implementation of the DDQL-MI following available information in this paper and another paper from the same author is provided as a baseline for comparison.
+The rising popularity of smart meters arised privacy concern on its fine-grained electricity consumption data collection. Sharing such data with utility providers may expose household members’ private information on its usage habits, potentially leading to unwanted surveillance and profiling.
+One promising approach to reduce private information leakage from the smart meter data is to use load shaping strategies. For example, one may create artificial grid load by using an energy management unit (EMU) with a rechargeable battery (RB) to mask the household’s load. Previous studies have shown that the EMU policy can be learnt using reinforcement learning (RL) with a mutual information (MI)-based reward signal. However, its adaptation is limited on quantized household load and charging/discharging power, and low sample rate.
+To address this limitation, we extend the EMU policy with MI-based reward signal to support continuous household load and charging/discharging power on a relatively high sample rate. The approach is implemented with a policy gradient algorithm namely proximal policy optimization (PPO). Performance of the new algorithm (PPO-MI) is evaluated using an actual SMs dataset and compared with its state-of-the-art quantized counterpart (DDQL-MI). Our results show significant improvement over its quantized counterpart in both privacy and cost metrics. PPO-MI achieved 69.24% reduction in average MI compared to DDQL-MI under balanced privacy- cost trade-off, while reducing the incurred extra electricity cost by 18.36%. This work will be submitted to the IEEE Transactions on Smart Grid, with the draft paper available in Appendix G.
 
-A custom RL environment mimicking the energy management unit is produced, which includes a rechargeable battery with adjustable efficiency, a H-network to be trained along with.
+## How to Start
 
-For info about dataset creation, please go to [README](dataset/README.md)
+We first create the dataset, then execute the training scripts.
 
-## Environment Setup
+### Creating the dataset
 
-Setup the conda environment using `environment.yml`.
+1. Download the UK-DALE dataset (Disaggregated (6s) appliance power and aggregated (1s) whole house power) from [UK-DALE dataset download page](https://dap.ceda.ac.uk/edc/efficiency/residential/EnergyConsumption/Domestic/UK-DALE-2017/ReadMe_DALE-2017.html). Put the downloaded `UK-DALE-2017.tgz` under `./datasets` by creating a `datasets` folder.
+
+2. Unzip the `UK-DALE-2017.tgz` folder, and undzip the `ukdale.zip` file. The resulting folder strucutre should be like this
+
+    ```text
+    datasets
+    |-- UK-DALE-FULL-disaggregated
+    |   |-- ukdale
+    |   |   |-- house_1
+    ```
+
+3. Create a conda virtual environment using `environment.yml`. Activate the environment.
+
+4. Run `01_data_cleaning.ipynb`
+
+5. Run `02_build_load_signature.ipynb`
+
+6. Run `03_data_split.ipynb`. For more information, please go to [dataset/README](dataset/README.md)
+
+7. Run `04_downsampling.ipynb`
+
+### Performing experiments
+
+1. To train the PPO-MI models, open `rl_training_bashscript.sh`. Comment line 5 and uncomment line 6. I.e.
+
+    `rl_training_bashscript.sh`
+
+    ```bash
+    #!/bin/bash
+
+    reward_lambda_array=("0" "0.5" "1")
+    # reward_lambda="0.5"
+    # action_type_array=("discrete")
+    action_type_array=("continuous")
+    n_episodes=800
+    seed=42
+    ```
+
+    Then activate the virtual environment, and execute this script under the project root directory.
+
+2. To train the DDQL-MI models, open `rl_training_bashscript.sh`. Comment line 6 and uncomment line 5. I.e.
+
+    `rl_training_bashscript.sh`
+
+    ```bash
+    #!/bin/bash
+
+    reward_lambda_array=("0" "0.5" "1")
+    # reward_lambda="0.5"
+    action_type_array=("discrete")
+    # action_type_array=("continuous")
+    n_episodes=800
+    seed=42
+    ```
+
+    Then activate the virtual environment, and execute this script under the project root directory.
+
+3. To execute hyperparameter optimization script for PPO-MI, execute `rl_training_script_PPO_finetuning.py` for 30 trials. This should take around 2 days on a single RTX4090.
+
+4. Training results can be analyzed using
+
+    - `expt_results_cross_models.ipynb`
+    - `expt_results_cross_models_privacy_protection.ipynb`
+    - `expt_results_cross_models_privacy_protection_logtest.ipynb`
+    - `expt_results_cross_models_multi_episodes.ipynb`
+    - `expt_results_cross_models_hnetwork.ipynb`
