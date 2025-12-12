@@ -1,9 +1,7 @@
 #!/bin/bash
 
 reward_lambda_array=("0" "0.5" "1")
-# reward_lambda="0.5"
-action_type_array=("discrete")
-# action_type_array=("continuous")
+action_type_array=("discrete" "continuous")
 n_episodes=800
 seed=42
 

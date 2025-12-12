@@ -343,7 +343,7 @@ if __name__ == "__main__":
     torch.set_num_threads(1)  # set number of threads to  1 for faster training ??
 
     N_STARTUP_TRIALS = 5
-    N_TRIALS = 50
+    N_TRIALS = 30           # 30 trials is sufficient.
 
     training_kwargs = {
         "reward_lambda": 0.5,

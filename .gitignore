@@ -213,6 +213,7 @@ __marimo__/
 rl_model/
 model_trained/
 experiments/
+experiments_graphs/
 *.pdf
 rl_env/octopus_2025Jul_Tariff.png
 
