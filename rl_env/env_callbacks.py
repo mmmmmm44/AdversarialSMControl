@@ -392,8 +392,9 @@ class ValidateEveryNEpisodes(EventCallback):
             
             # Run the episode until completion
             while not done:
-                # Get action from the model (deterministic evaluation)
-                action, state = model.predict(obs, state=state, deterministic=True)
+                # Get action from the model
+                # no deterministic, as it will break the learned stochastic policy
+                action, state = model.predict(obs, state=state)
                 
                 # Take step in environment
                 obs, reward, done, truncated, info = self.validation_env.step(action)
